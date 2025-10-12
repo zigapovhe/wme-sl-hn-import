@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WME Quick HN Importer - Slovenia
 // @namespace
-// @version      0.8.3
+// @version      0.8.4
 // @description  Display Slovenian house numbers on WME map for easy reference
 // @author       ThatByte
 // @match        https://www.waze.com/editor*
@@ -269,7 +269,7 @@
             'service=WFS&version=2.0.0&request=GetFeature&typeNames=ad:Address&outputFormat=GML32&' +
             `bbox=${bl[0]},${bl[1]},${tr[0]},${tr[1]},urn:ogc:def:crs:EPSG::3794`;
 
-          const selectionHNMap = getSelectionHNsByStreet();
+          const selectionHNMap = getVisibleHNsByStreet();
 
           GM_xmlhttpRequest({
             method: 'GET',
@@ -410,45 +410,36 @@
         });
       }
 
-      // Map<normalizedStreetId, { set: Set<stringLower>, items: Array<{num:string, x:number, y:number}> }>
-      function getSelectionHNsByStreet() {
+      // Returns all HNs visible in current WME view, not only selected segments
+      function getVisibleHNsByStreet() {
         const map = new Map();
 
-        // segID -> normalized streetId
-        const segStreet = new Map();
-        const selection = W.selectionManager.getSegmentSelection();
-        selection.segments.forEach(seg => {
+        // Get visible bounds in EPSG:3857
+        const bounds = W.map.getExtent();
+
+        W.model.segmentHouseNumbers.getObjectArray().forEach(hn => {
+          const seg = W.model.segments.getObjectById(hn.attributes.segID);
+          if (!seg) return;
+
           const psid = seg.attributes.primaryStreetID;
           if (!psid) return;
           const st = W.model.streets.getObjectById(psid);
           const name = st?.attributes?.name;
           if (!name) return;
-          const sidNorm = name.toLowerCase().replace(/\s+/g, '_');
-          segStreet.set(seg.attributes.id, sidNorm);
-        });
 
-        // collect existing HNs per selected street (lowercased), with approximate positions
-        W.model.segmentHouseNumbers.getObjectArray().forEach(hn => {
-          const segId = hn.attributes.segID;
-          const sidNorm = segStreet.get(segId);
-          if (!sidNorm) return;
+          const sidNorm = name.toLowerCase().replace(/\s+/g, '_');
+
+          // Basic position check (only include HNs in visible bounds)
+          const g = hn.geometry || hn.attributes.geometry;
+          let x, y;
+          if (g && typeof g.x === 'number' && typeof g.y === 'number') { x = g.x; y = g.y; }
+          if (!x || !y || !bounds.containsLonLat({ lon: x, lat: y })) return;
 
           let entry = map.get(sidNorm);
           if (!entry) { entry = { set: new Set(), items: [] }; map.set(sidNorm, entry); }
 
           const numRaw = String(hn.attributes.number).trim();
           entry.set.add(numRaw);
-
-          let x, y;
-          try {
-            const g = hn.geometry || hn.attributes.geometry;
-            if (g && typeof g.x === 'number' && typeof g.y === 'number') {
-              x = g.x; y = g.y;
-            } else if (g?.getCentroid) {
-              const c = g.getCentroid();
-              x = c.x; y = c.y;
-            }
-          } catch (_) {}
           entry.items.push({ num: numRaw, x, y });
         });
 

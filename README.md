@@ -15,8 +15,7 @@ After installing the script and opening WME, you’ll find a new **“SL-HN”**
 4. Circles appear on the map:
    - 🟢 **Green:** House numbers that belong to the **selected street**  
    - ⚪️ **Gray:** House numbers for **nearby streets** not matching the selected one
-   - 🟥 **Red:** A **conflict** — the selected street already has a different house number nearby (possibly wrong or incorrectly cased, e.g. `4A` instead of `4a`)  
-   - Green circles that are *faded* mean that the number is **already present** in WME.
+   - 🟥 **Red:** A **conflict** — an existing house number differs from the EProstor value nearby (on the selected or other visible streets, possibly wrong or incorrectly cased, e.g. 4A instead of 4a).
 
 You can:
 - Toggle the layer on/off.
@@ -71,6 +70,6 @@ You can:
 
 ## 📅 Version
 
-**0.8.3** – October 2025  
+**0.8.4** – October 2025  
 Author: [ThatByte](https://www.waze.com/user/editor/ThatByte)  
 License: MIT
