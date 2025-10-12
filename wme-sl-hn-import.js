@@ -1,13 +1,17 @@
 // ==UserScript==
 // @name         WME Quick HN Importer - Slovenia
-// @namespace    http://tampermonkey.net/
-// @version      0.8
-// @description  Display Slovenian house numbers on WME map for easy reference (Script tab UI, UX improvements; GML only)
+// @namespace
+// @version      0.8.1
+// @description  Display Slovenian house numbers on WME map for easy reference
 // @author       ThatByte
-// @include      /^https:\/\/(www|beta)\.waze\.com\/(?!user\/)(.{2,6}\/)?editor.*$/
+// @match        https://www.waze.com/editor*
+// @match        https://www.waze.com/*/editor*
+// @match        https://beta.waze.com/*
+// @exclude      https://www.waze.com/user/editor*
 // @connect      storitve.eprostor.gov.si
 // @require      https://cdnjs.cloudflare.com/ajax/libs/proj4js/2.9.0/proj4.js
 // @grant        GM_xmlhttpRequest
+// @noframes
 // ==/UserScript==
 
 /* global W, OpenLayers, I18n, proj4, getWmeSdk */
@@ -36,7 +40,7 @@
     } catch (_) { console.info(`[QHN] ${msg}`); }
   };
 
-  // EPSG:3794 once
+  // Slovenian CRS (define once)
   if (!proj4.defs['EPSG:3794']) {
     proj4.defs(
       'EPSG:3794',
@@ -113,7 +117,7 @@
       '<div style="margin:0 auto; max-width:300px; text-align:center; background:rgba(0, 0, 0, 0.5); color:white; border-radius:3px; padding:5px 15px;"><i class="fa fa-pulse fa-spinner"></i> Loading address points</div>';
     document.getElementById('map').appendChild(loading);
 
-    // Script tab UI
+    // Scripts tab UI
     wmeSDK.Sidebar.registerScriptTab().then(({ tabLabel, tabPane }) => {
       tabLabel.innerText = 'SL-HN';
       tabLabel.title = 'Quick HN Importer (Slovenia)';
@@ -145,11 +149,11 @@
       const bufferEl   = tabPane.querySelector('#qhn-buffer');
       const statusDiv  = tabPane.querySelector('#hn-status');
 
-      // wz-checkbox utils
+      // wz-checkbox helpers
       const isChecked  = (el) => el?.hasAttribute('checked');
       const setChecked = (el, v) => v ? el.setAttribute('checked','') : el.removeAttribute('checked');
 
-      // Load persisted
+      // Init persisted values
       bufferEl.value = String(LS.getBuffer());
       if (LS.getLayerVisible()) {
         setChecked(chkVis, true);
@@ -162,7 +166,7 @@
         LS.setBuffer(val);
       });
 
-      // Toggle layer
+      // Toggle visibility + persist
       chkVis.addEventListener('click', () => {
         const on = isChecked(chkVis);
         setChecked(chkVis, !on);
@@ -170,7 +174,7 @@
         LS.setLayerVisible(!on);
       });
 
-      // Apply filter
+      // Toggle "only missing" -> re-apply filter
       chkMissing.addEventListener('click', () => {
         setChecked(chkMissing, !isChecked(chkMissing));
         applyFeatureFilter();
@@ -216,10 +220,15 @@
         const onlyMissing = isChecked(chkMissing);
         layer.removeAllFeatures();
         if (!lastFeatures.length) return;
-        layer.addFeatures(onlyMissing ? lastFeatures.filter(f => !f.attributes?.processed) : lastFeatures);
+        if (onlyMissing) {
+          const filtered = lastFeatures.filter(f => !f.attributes?.processed);
+          layer.addFeatures(filtered);
+        } else {
+          layer.addFeatures(lastFeatures);
+        }
       }
 
-      // --- Data (GML) ---
+      // -------- Data loading (GML only) --------
       function updateLayer(statusDiv) {
         return new Promise((resolve) => {
           const selection = W.selectionManager.getSegmentSelection();
@@ -232,7 +241,7 @@
 
           loading.style.display = null;
 
-          // bounds of selected segments
+          // Bounds of selected segments
           let bounds = null;
           selection.segments.forEach(seg => {
             bounds == null
@@ -245,22 +254,22 @@
           const b = bounds.clone();
           b.left -= buffer; b.right += buffer; b.bottom -= buffer; b.top += buffer;
 
-          // to EPSG:3794 for WFS
+          // Transform to EPSG:3794 for WFS
           const bl = proj4('EPSG:3857', 'EPSG:3794', [b.left,  b.bottom]);
           const tr = proj4('EPSG:3857', 'EPSG:3794', [b.right, b.top]);
 
-          const urlGml = 'https://storitve.eprostor.gov.si/ows-ins-wfs/ows?'
-            + 'service=WFS&version=2.0.0&request=GetFeature&typeNames=ad:Address&outputFormat=GML32&'
-            + `bbox=${bl[0]},${bl[1]},${tr[0]},${tr[1]},urn:ogc:def:crs:EPSG::3794`;
+          const urlGml = 'https://storitve.eprostor.gov.si/ows-ins-wfs/ows?' +
+            'service=WFS&version=2.0.0&request=GetFeature&typeNames=ad:Address&outputFormat=GML32&' +
+            `bbox=${bl[0]},${bl[1]},${tr[0]},${tr[1]},urn:ogc:def:crs:EPSG::3794`;
 
-          const currentHNs = getSelectionHNs();
+          const selectionHNMap = getSelectionHNsByStreet();
 
           GM_xmlhttpRequest({
             method: 'GET',
             url: urlGml,
             onload: function (response) {
               try {
-                // parse GML
+                // Parse GML
                 const parser = new DOMParser();
                 const xmlDoc = parser.parseFromString(response.responseText, 'text/xml');
                 const addresses = xmlDoc.getElementsByTagNameNS(
@@ -273,14 +282,14 @@
                 for (let i = 0; i < addresses.length; i++) {
                   const address = addresses[i];
 
-                  // coords
+                  // Coordinates
                   const pos = address.getElementsByTagNameNS('http://www.opengis.net/gml/3.2', 'pos')[0];
                   if (!pos) continue;
                   const coords = pos.textContent.trim().split(' ');
                   const [x3794, y3794] = coords.map(parseFloat);
                   const [wx, wy] = proj4('EPSG:3794', 'EPSG:3857', [x3794, y3794]);
 
-                  // house number
+                  // House number
                   const designators = address.getElementsByTagNameNS(
                     'http://inspire.ec.europa.eu/schemas/ad/4.0',
                     'designator'
@@ -292,7 +301,7 @@
                   }
                   if (!hn) continue;
 
-                  // street name
+                  // Street name
                   const components = address.getElementsByTagNameNS(
                     'http://inspire.ec.europa.eu/schemas/ad/4.0',
                     'component'
@@ -311,11 +320,15 @@
                     streetNames[streetId] = streetName;
                   }
 
+                  // IMPORTANT: processed only if THIS street already has this number
+                  const processed =
+                    selectionHNMap.get(streetId)?.has(hn) === true;
+
                   features.push(
                     new OpenLayers.Feature.Vector(new OpenLayers.Geometry.Point(wx, wy), {
                       number: hn,
                       street: streetId,
-                      processed: currentHNs.indexOf(hn) !== -1,
+                      processed
                     })
                   );
                 }
@@ -339,6 +352,7 @@
                 });
                 currentStreetId = best || null;
 
+                // Early exit if nothing returned
                 if (!features.length) {
                   loading.style.display = 'none';
                   statusDiv.textContent = 'No address points in view.';
@@ -346,8 +360,9 @@
                   return;
                 }
 
-                // render
+                // Store + apply filter
                 lastFeatures = features;
+
                 layer.removeAllFeatures();
                 if (chkMissing.hasAttribute('checked')) {
                   layer.addFeatures(lastFeatures.filter(f => !f.attributes?.processed));
@@ -375,21 +390,43 @@
         });
       }
 
-      // HNs already on selected segments
-      function getSelectionHNs() {
-        const selectedSegIds = W.selectionManager
-          .getSegmentSelection()
-          .segments.map(s => s.attributes.id);
-        return W.model.segmentHouseNumbers
+      // Helper: existing HNs per street for the CURRENT selection
+      // Returns Map<normalizedStreetId, Set<houseNumber>>
+      function getSelectionHNsByStreet() {
+        const map = new Map();
+
+        // Map selected segID -> normalized streetId
+        const segStreet = new Map();
+        const selection = W.selectionManager.getSegmentSelection();
+        selection.segments.forEach(seg => {
+          const psid = seg.attributes.primaryStreetID;
+          if (!psid) return;
+          const st = W.model.streets.getObjectById(psid);
+          const name = st?.attributes?.name;
+          if (!name) return;
+          const sidNorm = name.toLowerCase().replace(/\s+/g, '_');
+          segStreet.set(seg.attributes.id, sidNorm);
+        });
+
+        // Collect existing numbers by that normalized streetId
+        W.model.segmentHouseNumbers
           .getObjectArray()
-          .filter(hn => selectedSegIds.indexOf(hn.attributes.segID) !== -1)
-          .map(hn => hn.attributes.number);
+          .forEach(hn => {
+            const segId = hn.attributes.segID;
+            const sidNorm = segStreet.get(segId);
+            if (!sidNorm) return;
+            let set = map.get(sidNorm);
+            if (!set) { set = new Set(); map.set(sidNorm, set); }
+            set.add(hn.attributes.number);
+          });
+
+        return map;
       }
-    });
+    }); // end registerScriptTab
   }
 
-  // SDK init
-  (("unsafeWindow" in window ? window.unsafeWindow : window).SDK_INITIALIZED).then(() => {
+  // Initialize the WME Scripts SDK (required)
+  (('unsafeWindow' in window ? window.unsafeWindow : window).SDK_INITIALIZED).then(() => {
     wmeSDK = getWmeSdk({ scriptId: 'quick-hn-sl-importer', scriptName: 'Quick HN Importer (SI)' });
     bootstrap();
   });
