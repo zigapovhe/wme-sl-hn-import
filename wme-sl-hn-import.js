@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WME Quick HN Importer - Slovenia
 // @namespace
-// @version      0.8.1
+// @version      0.8.2
 // @description  Display Slovenian house numbers on WME map for easy reference
 // @author       ThatByte
 // @match        https://www.waze.com/editor*
@@ -297,7 +297,7 @@
                   let hn = null;
                   for (let j = 0; j < designators.length; j++) {
                     const val = designators[j].textContent.trim();
-                    if (val) { hn = val; break; }
+                    if (val) { hn = val.toLowerCase().trim(); break; }
                   }
                   if (!hn) continue;
 
