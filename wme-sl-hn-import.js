@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WME Quick HN Importer - Slovenia
 // @namespace
-// @version      0.8.2
+// @version      0.8.3
 // @description  Display Slovenian house numbers on WME map for easy reference
 // @author       ThatByte
 // @match        https://www.waze.com/editor*
@@ -29,7 +29,6 @@
     setLayerVisible(v){ localStorage.setItem('qhn-layer-visible', v ? '1' : '0'); }
   };
 
-  // Toast helper
   const toast = (msg, type = 'info') => {
     try {
       if (wmeSDK?.Notifications?.show) {
@@ -88,12 +87,23 @@
           },
           {
             context: {
-              fillColor: f => f.attributes && f.attributes.street === currentStreetId ? '#99ee99' : '#cccccc',
-              radius:   f => (f.attributes && f.attributes.number) ? Math.max(f.attributes.number.length * 6, 10) : 10,
-              // fade = selected street + already in WME
-              opacity:  f => (currentStreetId && f.attributes?.street === currentStreetId && f.attributes?.processed) ? 0.3 : 1,
-              title:    f => (f.attributes && f.attributes.number && f.attributes.street)
-                             ? `${streetNames[f.attributes.street]} ${f.attributes.number}` : ''
+              fillColor: f => {
+                const a = f.attributes || {};
+                if (a.conflict) return '#ff6666';                              // red = suspected wrong HN in WME
+                return (a.street === currentStreetId) ? '#99ee99' : '#cccccc';  // green = selected street, gray = other
+              },
+              radius: f => (f.attributes && f.attributes.number)
+                ? Math.max(f.attributes.number.length * 6, 10)
+                : 10,
+              // fade only exact matches on the selected street
+              opacity: f => {
+                const a = f.attributes || {};
+                if (a.conflict) return 1;
+                return (currentStreetId && a.street === currentStreetId && a.processed) ? 0.3 : 1;
+              },
+              title: f => (f.attributes && f.attributes.number && f.attributes.street)
+                ? `${streetNames[f.attributes.street]} ${f.attributes.number}`
+                : ''
             }
           }
         ),
@@ -106,7 +116,7 @@
     layer.setVisibility(false);
     W.map.addLayer(layer);
 
-    // Small inline loader
+    // Inline loader
     const loading = document.createElement('div');
     loading.style.position = 'absolute';
     loading.style.bottom = '35px';
@@ -136,12 +146,11 @@
           </div>
           <div id="hn-status" style="margin-top:10px;font-size:12px;color:#666;line-height:1.4;">
             <b>Instructions</b><br/>
-            1) Select a segment • 2) Click “Load visible selection” • Green = selected street • Faded = already in WME
+            1) Select a segment • 2) Click “Load visible selection” • Green = selected street • Gray = other streets • Red = possible wrong HN in WME • Faded = already in WME
           </div>
         </div>
       `;
 
-      // Elements
       const btnLoad    = tabPane.querySelector('#hn-load');
       const btnClear   = tabPane.querySelector('#hn-clear');
       const chkVis     = tabPane.querySelector('#hn-toggle');
@@ -149,11 +158,9 @@
       const bufferEl   = tabPane.querySelector('#qhn-buffer');
       const statusDiv  = tabPane.querySelector('#hn-status');
 
-      // wz-checkbox helpers
       const isChecked  = (el) => el?.hasAttribute('checked');
       const setChecked = (el, v) => v ? el.setAttribute('checked','') : el.removeAttribute('checked');
 
-      // Init persisted values
       bufferEl.value = String(LS.getBuffer());
       if (LS.getLayerVisible()) {
         setChecked(chkVis, true);
@@ -166,7 +173,6 @@
         LS.setBuffer(val);
       });
 
-      // Toggle visibility + persist
       chkVis.addEventListener('click', () => {
         const on = isChecked(chkVis);
         setChecked(chkVis, !on);
@@ -180,7 +186,6 @@
         applyFeatureFilter();
       });
 
-      // Load flow
       btnLoad.addEventListener('click', async () => {
         if (isLoading) return;
         isLoading = true;
@@ -213,15 +218,17 @@
         currentStreetId = null;
         lastFeatures = [];
         statusDiv.innerHTML = `<b>Instructions</b><br/>
-          1) Select a segment • 2) Click “Load visible selection” • Green = selected street • Faded = already in WME`;
+          1) Select a segment • 2) Click “Load visible selection” • Green = selected street • Gray = other streets • Red = possible wrong HN in WME • Faded = already in WME`;
       });
 
       function applyFeatureFilter() {
         const onlyMissing = isChecked(chkMissing);
         layer.removeAllFeatures();
         if (!lastFeatures.length) return;
+
         if (onlyMissing) {
-          const filtered = lastFeatures.filter(f => !f.attributes?.processed);
+          // Keep conflicts OR not-processed; hide exact matches only
+          const filtered = lastFeatures.filter(f => f.attributes?.conflict || !f.attributes?.processed);
           layer.addFeatures(filtered);
         } else {
           layer.addFeatures(lastFeatures);
@@ -249,7 +256,7 @@
               : bounds.extend(seg.attributes.geometry.getBounds());
           });
 
-          // user buffer
+          // buffer
           const buffer = LS.getBuffer();
           const b = bounds.clone();
           b.left -= buffer; b.right += buffer; b.bottom -= buffer; b.top += buffer;
@@ -289,7 +296,7 @@
                   const [x3794, y3794] = coords.map(parseFloat);
                   const [wx, wy] = proj4('EPSG:3794', 'EPSG:3857', [x3794, y3794]);
 
-                  // House number
+                  // House number (lowercase)
                   const designators = address.getElementsByTagNameNS(
                     'http://inspire.ec.europa.eu/schemas/ad/4.0',
                     'designator'
@@ -320,20 +327,35 @@
                     streetNames[streetId] = streetName;
                   }
 
-                  // IMPORTANT: processed only if THIS street already has this number
-                  const processed =
-                    selectionHNMap.get(streetId)?.has(hn) === true;
+                  // processed = exact same HN already on this street (case-insensitive via normalization)
+                  const entry = selectionHNMap.get(streetId);
+                  const processed = entry?.set.has(hn) === true;
+
+                  // conflict = a different HN already exists nearby on the same street
+                  let conflict = false;
+                  if (!processed && entry?.items?.length) {
+                    const epX = wx, epY = wy;
+                    const MAX_M = 25; // distance threshold in meters (EPSG:3857 approx)
+                    for (const it of entry.items) {
+                      if (!it || it.x == null || it.y == null) continue;
+                      if (it.num !== hn) {
+                        const dx = epX - it.x, dy = epY - it.y;
+                        if (dx*dx + dy*dy <= MAX_M*MAX_M) { conflict = true; break; }
+                      }
+                    }
+                  }
 
                   features.push(
                     new OpenLayers.Feature.Vector(new OpenLayers.Geometry.Point(wx, wy), {
                       number: hn,
                       street: streetId,
-                      processed
+                      processed,
+                      conflict
                     })
                   );
                 }
 
-                // pick best match across selected segments
+                // choose best street among selected segments
                 const allStreetIds = new Set();
                 selection.segments.forEach(seg => {
                   (seg.attributes.streetIDs || []).forEach(id => allStreetIds.add(id));
@@ -352,7 +374,6 @@
                 });
                 currentStreetId = best || null;
 
-                // Early exit if nothing returned
                 if (!features.length) {
                   loading.style.display = 'none';
                   statusDiv.textContent = 'No address points in view.';
@@ -360,18 +381,17 @@
                   return;
                 }
 
-                // Store + apply filter
                 lastFeatures = features;
 
                 layer.removeAllFeatures();
                 if (chkMissing.hasAttribute('checked')) {
-                  layer.addFeatures(lastFeatures.filter(f => !f.attributes?.processed));
+                  layer.addFeatures(lastFeatures.filter(f => f.attributes?.conflict || !f.attributes?.processed));
                 } else {
                   layer.addFeatures(lastFeatures);
                 }
 
                 loading.style.display = 'none';
-                statusDiv.textContent = `Loaded ${lastFeatures.length} address points. Green = selected street`;
+                statusDiv.textContent = `Loaded ${lastFeatures.length} address points. Green = selected street • Gray = other streets • Red = possible wrong HN in WME`;
                 resolve();
               } catch (err) {
                 fail(err);
@@ -390,12 +410,11 @@
         });
       }
 
-      // Helper: existing HNs per street for the CURRENT selection
-      // Returns Map<normalizedStreetId, Set<houseNumber>>
+      // Map<normalizedStreetId, { set: Set<stringLower>, items: Array<{num:string, x:number, y:number}> }>
       function getSelectionHNsByStreet() {
         const map = new Map();
 
-        // Map selected segID -> normalized streetId
+        // segID -> normalized streetId
         const segStreet = new Map();
         const selection = W.selectionManager.getSegmentSelection();
         selection.segments.forEach(seg => {
@@ -408,24 +427,37 @@
           segStreet.set(seg.attributes.id, sidNorm);
         });
 
-        // Collect existing numbers by that normalized streetId
-        W.model.segmentHouseNumbers
-          .getObjectArray()
-          .forEach(hn => {
-            const segId = hn.attributes.segID;
-            const sidNorm = segStreet.get(segId);
-            if (!sidNorm) return;
-            let set = map.get(sidNorm);
-            if (!set) { set = new Set(); map.set(sidNorm, set); }
-            set.add(hn.attributes.number);
-          });
+        // collect existing HNs per selected street (lowercased), with approximate positions
+        W.model.segmentHouseNumbers.getObjectArray().forEach(hn => {
+          const segId = hn.attributes.segID;
+          const sidNorm = segStreet.get(segId);
+          if (!sidNorm) return;
+
+          let entry = map.get(sidNorm);
+          if (!entry) { entry = { set: new Set(), items: [] }; map.set(sidNorm, entry); }
+
+          const numRaw = String(hn.attributes.number).trim();
+          entry.set.add(numRaw);
+
+          let x, y;
+          try {
+            const g = hn.geometry || hn.attributes.geometry;
+            if (g && typeof g.x === 'number' && typeof g.y === 'number') {
+              x = g.x; y = g.y;
+            } else if (g?.getCentroid) {
+              const c = g.getCentroid();
+              x = c.x; y = c.y;
+            }
+          } catch (_) {}
+          entry.items.push({ num: numRaw, x, y });
+        });
 
         return map;
       }
     }); // end registerScriptTab
   }
 
-  // Initialize the WME Scripts SDK (required)
+  // Initialize the WME Scripts SDK
   (('unsafeWindow' in window ? window.unsafeWindow : window).SDK_INITIALIZED).then(() => {
     wmeSDK = getWmeSdk({ scriptId: 'quick-hn-sl-importer', scriptName: 'Quick HN Importer (SI)' });
     bootstrap();

@@ -14,7 +14,8 @@ After installing the script and opening WME, you’ll find a new **“SL-HN”**
 3. The script fetches nearby address points (via EProstor WFS).  
 4. Circles appear on the map:
    - 🟢 **Green:** House numbers that belong to the **selected street**  
-   - ⚪️ **Gray:** House numbers for **nearby streets** not matching the selected one  
+   - ⚪️ **Gray:** House numbers for **nearby streets** not matching the selected one
+   - 🟥 **Red:** A **conflict** — the selected street already has a different house number nearby (possibly wrong or incorrectly cased, e.g. `4A` instead of `4a`)  
    - Green circles that are *faded* mean that the number is **already present** in WME.
 
 You can:
@@ -29,6 +30,13 @@ You can:
 - **Mismatched street names:**  
   If houses that should be on the selected street show up as **gray**, the street name in Waze may not exactly match the official one in EProstor (different capitalization, spelling, or incorrect naming).  
   → Fix the street name in Waze before adding the house numbers.
+
+- **Red conflicts (wrong or mismatched HNs):**  
+  Red circles appear when a **different house number already exists nearby** on the same street.  
+  This usually means:
+  - The number in WME is **wrong**, or  
+  - There’s a **case mismatch** (e.g. `4A` in WME vs `4a` in EProstor).  
+  These should be checked and corrected manually in Waze.
 
 - **Limited scope:**  
   Currently only supports **Slovenian EProstor** data (GML/WFS format).
@@ -63,6 +71,6 @@ You can:
 
 ## 📅 Version
 
-**0.8.1** – October 2025  
+**0.8.3** – October 2025  
 Author: [ThatByte](https://www.waze.com/user/editor/ThatByte)  
 License: MIT
