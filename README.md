@@ -1,5 +1,9 @@
 # WME Quick HN Importer – Slovenia 🇸🇮
 
+<img src="./icon64.png" alt="SL-HN icon" align="left" width="64" height="64">
+
+![WME Quick HN Importer preview](./screenshot1.png)
+
 A **Tampermonkey userscript** for Waze Map Editor (WME) that displays official Slovenian house numbers from *EProstor* directly on the WME map.  
 This helps editors quickly add and verify house numbers without manually opening external GIS portals.
 
