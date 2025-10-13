@@ -52,10 +52,10 @@ You can:
 ## 🛠️ Installation
 
 1. Install the [Tampermonkey](https://www.tampermonkey.net/) extension.  
-2. [Download this script](./wme-sl-hn-import.js) or open it directly from GitHub’s *Raw* view.  
-3. Tampermonkey should prompt you to install it.  
-4. Reload Waze Map Editor (beta or production).  
-5. Look for the **SL-HN** tab under the *Scripts* section.
+2. [Click here to install the script](https://raw.githubusercontent.com/zigapovhe/wme-sl-hn-import/main/wme-sl-hn-import.user.js).  
+   Tampermonkey should automatically detect and prompt for installation.  
+3. After installation, reload the Waze Map Editor (production or beta).  
+4. Look for the **SL-HN** tab under the *Scripts* section in the sidebar.
 
 ---
 
@@ -68,8 +68,6 @@ You can:
 
 ---
 
-## 📅 Version
-
-**0.8.5** – October 2025  
+## 👤 Author
 Author: [ThatByte](https://www.waze.com/user/editor/ThatByte)  
 License: MIT

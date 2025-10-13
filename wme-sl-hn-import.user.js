@@ -7,6 +7,8 @@
 // @downloadURL  https://raw.githubusercontent.com/zigapovhe/wme-sl-hn-import/main/wme-sl-hn-import.user.js
 // @updateURL    https://raw.githubusercontent.com/zigapovhe/wme-sl-hn-import/main/wme-sl-hn-import.user.js
 // @supportURL   https://github.com/zigapovhe/wme-sl-hn-import/issues
+// @icon         https://raw.githubusercontent.com/zigapovhe/wme-sl-hn-import/main/icon48.png
+// @icon64       https://raw.githubusercontent.com/zigapovhe/wme-sl-hn-import/main/icon64.png
 // @match        https://www.waze.com/editor*
 // @match        https://www.waze.com/*/editor*
 // @match        https://beta.waze.com/*
@@ -28,10 +30,10 @@
 
   // LocalStorage helpers
   const LS = {
-    getBuffer()       { return Number(localStorage.getItem('qhn-buffer') ?? '200'); },
-    setBuffer(v)      { localStorage.setItem('qhn-buffer', String(v)); },
-    getLayerVisible() { return localStorage.getItem('qhn-layer-visible') === '1'; },
-    setLayerVisible(v){ localStorage.setItem('qhn-layer-visible', v ? '1' : '0'); }
+    getBuffer()       { return Number(localStorage.getItem('qhnsl-buffer') ?? '200'); },
+    setBuffer(v)      { localStorage.setItem('qhnsl-buffer', String(v)); },
+    getLayerVisible() { return localStorage.getItem('qhnsl-layer-visible') === '1'; },
+    setLayerVisible(v){ localStorage.setItem('qhnsl-layer-visible', v ? '1' : '0'); }
   };
 
   const toast = (msg, type = 'info') => {
@@ -39,9 +41,9 @@
       if (wmeSDK?.Notifications?.show) {
         wmeSDK.Notifications.show({ text: msg, type, timeout: 3500 });
       } else {
-        console.info(`[QHN] ${msg}`);
+        console.info(`[SL-HN] ${msg}`);
       }
-    } catch (_) { console.info(`[QHN] ${msg}`); }
+    } catch (_) { console.info(`[SL-HN] ${msg}`); }
   };
 
   // Slovenian CRS (define once)
@@ -138,7 +140,7 @@
       tabLabel.title = 'Quick HN Importer (Slovenia)';
 
       tabPane.innerHTML = `
-        <div id="qhn-pane" style="padding:10px;">
+        <div id="qhnsl-pane" style="padding:10px;">
           <h2 style="margin-top:0;">Quick HN Importer 🇸🇮</h2>
           <div style="display:flex;gap:6px;flex-wrap:wrap;margin:4px 0 8px 0;">
             <button id="hn-load" class="wz-button">Load visible selection</button>
@@ -146,8 +148,8 @@
           </div>
           <div style="display:flex;gap:12px;align-items:center;">
             <wz-checkbox id="hn-toggle">Show layer</wz-checkbox>
-            <wz-checkbox id="qhn-missing">Show only missing</wz-checkbox>
-            <span style="font-size:12px;">Buffer (m): <input id="qhn-buffer" type="number" min="0" step="50" style="width:80px;margin-left:6px"></span>
+            <wz-checkbox id="qhnsl-missing">Show only missing</wz-checkbox>
+            <span style="font-size:12px;">Buffer (m): <input id="qhnsl-buffer" type="number" min="0" step="50" style="width:80px;margin-left:6px"></span>
           </div>
           <div id="hn-status" style="margin-top:10px;font-size:12px;color:#666;line-height:1.4;">
             <b>Instructions</b><br/>
@@ -159,8 +161,8 @@
       const btnLoad    = tabPane.querySelector('#hn-load');
       const btnClear   = tabPane.querySelector('#hn-clear');
       const chkVis     = tabPane.querySelector('#hn-toggle');
-      const chkMissing = tabPane.querySelector('#qhn-missing');
-      const bufferEl   = tabPane.querySelector('#qhn-buffer');
+      const chkMissing = tabPane.querySelector('#qhnsl-missing');
+      const bufferEl   = tabPane.querySelector('#qhnsl-buffer');
       const statusDiv  = tabPane.querySelector('#hn-status');
 
       const isChecked  = (el) => el?.hasAttribute('checked');
