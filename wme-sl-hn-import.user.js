@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WME Quick HN Importer - Slovenia
 // @namespace    https://github.com/zigapovhe/wme-sl-hn-import
-// @version      0.8.5
+// @version      0.9.0
 // @description  Display Slovenian house numbers on WME map for easy reference
 // @author       ThatByte
 // @downloadURL  https://raw.githubusercontent.com/zigapovhe/wme-sl-hn-import/main/wme-sl-hn-import.user.js
@@ -30,7 +30,7 @@
 
   // LocalStorage helpers
   const LS = {
-    getBuffer()       { return Number(localStorage.getItem('qhnsl-buffer') ?? '200'); },
+    getBuffer()       { return Number(localStorage.getItem('qhnsl-buffer') ?? '500'); },
     setBuffer(v)      { localStorage.setItem('qhnsl-buffer', String(v)); },
     getLayerVisible() { return localStorage.getItem('qhnsl-layer-visible') === '1'; },
     setLayerVisible(v){ localStorage.setItem('qhnsl-layer-visible', v ? '1' : '0'); }
@@ -143,7 +143,7 @@
         <div id="qhnsl-pane" style="padding:10px;">
           <h2 style="margin-top:0;">Quick HN Importer 🇸🇮</h2>
           <div style="display:flex;gap:6px;flex-wrap:wrap;margin:4px 0 8px 0;">
-            <button id="hn-load" class="wz-button">Load visible selection</button>
+            <button id="hn-load" class="wz-button">Load selected street</button>
             <button id="hn-clear" class="wz-button wz-button--secondary">Clear</button>
           </div>
           <div style="display:flex;gap:12px;align-items:center;">
@@ -153,7 +153,7 @@
           </div>
           <div id="hn-status" style="margin-top:10px;font-size:12px;color:#666;line-height:1.4;">
             <b>Instructions</b><br/>
-            1) Select a segment • 2) Click “Load visible selection” • Green = selected street • Gray = other streets • Red = possible wrong HN in WME • Faded = already in WME
+            1) Select a segment • 2) Click "Load selected street" • Green = selected street • Gray = other streets • Red = possible wrong HN in WME • Faded = already in WME
           </div>
         </div>
       `;
@@ -211,7 +211,7 @@
         LS.setLayerVisible(true);
 
         btnLoad.disabled = false;
-        btnLoad.textContent = 'Load visible selection';
+        btnLoad.textContent = 'Load selected street';
         isLoading = false;
       });
 
@@ -225,7 +225,7 @@
         currentStreetId = null;
         lastFeatures = [];
         statusDiv.innerHTML = `<b>Instructions</b><br/>
-          1) Select a segment • 2) Click “Load visible selection” • Green = selected street • Gray = other streets • Red = possible wrong HN in WME • Faded = already in WME`;
+          1) Select a segment • 2) Click "Load selected street" • Green = selected street • Gray = other streets • Red = possible wrong HN in WME • Faded = already in WME`;
       });
 
       function applyFeatureFilter() {
@@ -241,6 +241,90 @@
           layer.addFeatures(lastFeatures);
         }
       }
+
+      function recalculateFeatureStates() {
+        if (!lastFeatures.length) return;
+
+        const selectionHNMap = getVisibleHNsByStreet();
+
+        lastFeatures.forEach(feature => {
+          const { number: hn, street: streetId } = feature.attributes;
+          if (!hn || !streetId) return;
+
+          const wx = feature.geometry.x;
+          const wy = feature.geometry.y;
+
+          // Recalculate processed state
+          const entry = selectionHNMap.get(streetId);
+          const processed = entry?.set.has(hn) === true;
+
+          // Recalculate conflict state
+          let conflict = false;
+          if (!processed && entry?.items?.length) {
+            const MAX_M = 10; // distance threshold
+            for (const it of entry.items) {
+              if (!it || it.x == null || it.y == null) continue;
+              if (it.num !== hn) {
+                const dx = wx - it.x, dy = wy - it.y;
+                if (dx*dx + dy*dy <= MAX_M*MAX_M) {
+                  conflict = true;
+                  break;
+                }
+              }
+            }
+          }
+
+          feature.attributes.processed = processed;
+          feature.attributes.conflict = conflict;
+        });
+
+        layer.redraw();
+
+        console.log('[SL-HN] Feature states recalculated');
+      }
+
+      function setupHouseNumberEventListeners() {
+        const events = [
+          'wme-house-number-added',
+          'wme-house-number-deleted',
+          'wme-house-number-moved',
+          'wme-house-number-updated'
+        ];
+
+        events.forEach(eventName => {
+          wmeSDK.Events.on({
+            eventName,
+            eventHandler: (event) => {
+              // Only recalculate if we have loaded features
+              if (lastFeatures.length > 0) {
+                console.log(`[SL-HN] ${eventName} detected, recalculating states...`);
+                recalculateFeatureStates();
+                // Reapply filter if "show only missing" is checked
+                applyFeatureFilter();
+              }
+            }
+          });
+        });
+
+        // Also listen for map data loaded (viewport changes, zoom, refresh)
+        wmeSDK.Events.on({
+          eventName: 'wme-map-data-loaded',
+          eventHandler: () => {
+            // Only recalculate if we have loaded features
+            if (lastFeatures.length > 0) {
+              console.log('[SL-HN] Map data loaded, recalculating states...');
+              recalculateFeatureStates();
+              // Reapply filter if "show only missing" is checked
+              applyFeatureFilter();
+            }
+          }
+        });
+
+        console.log('[SL-HN] House number event listeners registered');
+      }
+
+      // Set up event listeners after SDK is ready
+      setupHouseNumberEventListeners();
 
       // -------- Data loading (GML only) --------
       function updateLayer(statusDiv) {
@@ -338,11 +422,11 @@
                   const entry = selectionHNMap.get(streetId);
                   const processed = entry?.set.has(hn) === true;
 
-                  // conflict = a different HN already exists nearby on the same street
+                  // conflict = a different HN already exists very close (same house, wrong number)
                   let conflict = false;
                   if (!processed && entry?.items?.length) {
                     const epX = wx, epY = wy;
-                    const MAX_M = 25; // distance threshold in meters (EPSG:3857 approx)
+                    const MAX_M = 10; // distance threshold in meters (EPSG:3857 approx)
                     for (const it of entry.items) {
                       if (!it || it.x == null || it.y == null) continue;
                       if (it.num !== hn) {
