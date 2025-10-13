@@ -70,6 +70,6 @@ You can:
 
 ## 📅 Version
 
-**0.8.4** – October 2025  
+**0.8.5** – October 2025  
 Author: [ThatByte](https://www.waze.com/user/editor/ThatByte)  
 License: MIT
