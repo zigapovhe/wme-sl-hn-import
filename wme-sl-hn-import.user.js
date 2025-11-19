@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WME Quick HN Importer - Slovenia
 // @namespace    https://github.com/zigapovhe/wme-sl-hn-import
-// @version      0.9.9
+// @version      0.9.5
 // @description  Quickly add Slovenian house numbers with clickable overlays
 // @author       ThatByte
 // @downloadURL  https://raw.githubusercontent.com/zigapovhe/wme-sl-hn-import/main/wme-sl-hn-import.user.js
@@ -22,7 +22,7 @@
 // ==/UserScript==
 
 /*
- * Click handling and nearest segment matching based on the work by
+ * Click handling and nearest segment matching based on work by
  * Tom 'Glodenox' Puttemans (https://github.com/Glodenox/wme-quick-hn-importer)
  */
 
@@ -33,6 +33,9 @@
 
   let wmeSDK;
   const LAYER_NAME = 'Quick HN Importer - Slovenia';
+
+  const MAX_CLICK_DISTANCE_PX = 25;
+  const MAX_HN_CONFLICT_DISTANCE = 10;
 
   const LS = {
     getBuffer()       { return Number(localStorage.getItem('qhnsl-buffer') ?? '500'); },
@@ -55,11 +58,16 @@
     }
   };
 
+  // EPSG:3794 definition (Slovenia)
   if (!proj4.defs['EPSG:3794']) {
     proj4.defs(
       'EPSG:3794',
       '+proj=tmerc +lat_0=0 +lon_0=15 +k=0.9999 +x_0=500000 +y_0=-5000000 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs'
     );
+  }
+
+  function normalizeStreetName(name) {
+    return String(name).toLowerCase().replace(/\s+/g, '_');
   }
 
   function getSegmentGeometry(seg) {
@@ -83,10 +91,6 @@
     let userWantsLayerVisible = false;
     let streetNameSpan = null;
     let currentStreetDiv = null;
-
-    let selectControl = null;
-    let lastZoom = W.map.getZoom();
-    let lastSelectionSegments = []; // stores last segment selection to "re-click" after zoom-in
 
     const layer = new OpenLayers.Layer.Vector(LAYER_NAME, {
       uniqueName: 'quick-hn-sl-importer',
@@ -144,60 +148,23 @@
       const currentZoom = W.map.getZoom();
       const shouldBeVisible = userWantsLayerVisible && currentZoom >= 18;
 
-      layer.setVisibility(shouldBeVisible);
+      if (layer.getVisibility() !== shouldBeVisible) {
+        layer.setVisibility(shouldBeVisible);
 
-      if (userWantsLayerVisible && currentZoom < 18 && lastFeatures.length > 0) {
-        toast('Zoom in to level 18+ to see house numbers', 'info');
+        if (userWantsLayerVisible && currentZoom < 18 && lastFeatures.length > 0) {
+          toast('Zoom in to level 18+ to see house numbers', 'info');
+        }
       }
     }
 
-    // Reproduce your "click segment, then click out" trick.
-    function reselectSavedStreetAfterZoomIn() {
-      if (!lastSelectionSegments.length) return;
-
-      try {
-        // 1) re-select last segments
-        W.selectionManager.setSelectedModels(lastSelectionSegments);
-        // 2) immediately clear selection (simulate click-out)
-        setTimeout(() => {
-          W.selectionManager.setSelectedModels([]);
-        }, 0);
-      } catch (e) {
-        console.warn('[SL-HN] Failed to reselect segments after zoom:', e);
-      }
-    }
-
-    // On zoom end, detect crossing from <18 back to >=18 and "re-click" selection
-    W.map.events.register('zoomend', null, () => {
-      const currentZoom = W.map.getZoom();
-      const wasBelow = lastZoom < 18;
-      const nowAboveOrEqual = currentZoom >= 18;
-
-      updateLayerVisibility();
-
-      if (userWantsLayerVisible && wasBelow && nowAboveOrEqual) {
-        reselectSavedStreetAfterZoomIn();
-      }
-
-      lastZoom = currentZoom;
-    });
-
-    // We keep moveend minimal now
-    W.map.events.register('moveend', null, () => {
-      // no-op for now, keeping it lean
-    });
-
+    W.map.events.register('zoomend', null, updateLayerVisibility);
+    W.map.events.register('moveend', null, updateLayerVisibility);
     W.selectionManager.events.register('selectionchanged', null, onSelectionChanged);
 
     function onSelectionChanged() {
-      const selection = W.selectionManager.getSegmentSelection();
-
-      // Save last selection so we can "replay" it after zoom
-      if (selection.segments && selection.segments.length > 0) {
-        lastSelectionSegments = selection.segments.slice();
-      }
-
       if (!lastFeatures.length) return;
+
+      const selection = W.selectionManager.getSegmentSelection();
       if (!selection.segments || selection.segments.length === 0) return;
 
       const selectedStreetIds = new Set();
@@ -239,20 +206,55 @@
       }
     }
 
-    selectControl = new OpenLayers.Control.SelectFeature(layer, {
-      onSelect: onFeatureSelect,
-      hover: false,
-      clickout: false,
-      multiple: false,
-      toggle: false
-    });
-    W.map.addControl(selectControl);
-    selectControl.activate();
+    // Click hit-test in pixel space (geometry EPSG:3857, W.map expects EPSG:4326)
+    function handleMapClick(evt) {
+      if (!layer.getVisibility() || !layer.features || !layer.features.length) return;
 
-    function onFeatureSelect(feature) {
-      selectControl.unselect(feature);
+      const clickPx = evt.xy;
+      if (!clickPx) return;
 
-      const attrs = feature.attributes;
+      const features = layer.features;
+      const MAX_PIXELS_SQ = MAX_CLICK_DISTANCE_PX * MAX_CLICK_DISTANCE_PX;
+
+      let bestFeature = null;
+      let bestDistSq = Infinity;
+
+      for (let i = 0; i < features.length; i++) {
+        const f = features[i];
+        const g = f.geometry;
+        if (!g) continue;
+
+        let lonLat;
+        try {
+          const [lon, lat] = proj4('EPSG:3857', 'EPSG:4326', [g.x, g.y]);
+          lonLat = new OpenLayers.LonLat(lon, lat);
+        } catch (e) {
+          console.warn('[SL-HN] Failed to transform point for hit-test:', e);
+          continue;
+        }
+
+        const fPx = W.map.getPixelFromLonLat(lonLat);
+        if (!fPx) continue;
+
+        const dx = fPx.x - clickPx.x;
+        const dy = fPx.y - clickPx.y;
+        const d2 = dx * dx + dy * dy;
+
+        if (d2 <= MAX_PIXELS_SQ && d2 < bestDistSq) {
+          bestDistSq = d2;
+          bestFeature = f;
+        }
+      }
+
+      if (!bestFeature) return;
+
+      onFeatureClick(bestFeature);
+    }
+
+    W.map.events.register('click', null, handleMapClick);
+
+    function onFeatureClick(feature) {
+      const attrs = feature.attributes || {};
       if (attrs.processed) return;
 
       const streetName = streetNames[attrs.street];
@@ -307,10 +309,7 @@
 
       if (matchName) {
         const matchingStreetIds = W.model.streets.getObjectArray()
-          .filter(street =>
-            street.attributes.name &&
-            street.attributes.name.toLowerCase() === streetName.toLowerCase()
-          )
+          .filter(street => street.attributes.name.toLowerCase() === streetName.toLowerCase())
           .map(street => street.attributes.id);
 
         if (matchingStreetIds.length === 0) {
@@ -554,12 +553,11 @@
 
           let conflict = false;
           if (!processed && entry?.items?.length) {
-            const MAX_M = 10;
             for (const it of entry.items) {
               if (!it || it.x == null || it.y == null) continue;
               if (it.num !== hn) {
                 const dx = wx - it.x, dy = wy - it.y;
-                if (dx*dx + dy*dy <= MAX_M*MAX_M) {
+                if (dx*dx + dy*dy <= MAX_HN_CONFLICT_DISTANCE * MAX_HN_CONFLICT_DISTANCE) {
                   conflict = true;
                   break;
                 }
@@ -702,7 +700,7 @@
                   }
                   if (!streetName) continue;
 
-                  const streetId = streetName.toLowerCase().replace(/\s+/g, '_');
+                  const streetId = normalizeStreetName(streetName);
                   if (!streets[streetName]) {
                     streets[streetName]   = streetId;
                     streetNames[streetId] = streetName;
@@ -714,12 +712,14 @@
                   let conflict = false;
                   if (!processed && entry?.items?.length) {
                     const epX = wx, epY = wy;
-                    const MAX_M = 10;
                     for (const it of entry.items) {
                       if (!it || it.x == null || it.y == null) continue;
                       if (it.num !== hn) {
                         const dx = epX - it.x, dy = epY - it.y;
-                        if (dx*dx + dy*dy <= MAX_M*MAX_M) { conflict = true; break; }
+                        if (dx*dx + dy*dy <= MAX_HN_CONFLICT_DISTANCE * MAX_HN_CONFLICT_DISTANCE) {
+                          conflict = true;
+                          break;
+                        }
                       }
                     }
                   }
@@ -791,6 +791,7 @@
         });
       }
 
+      // Visible HNs grouped by normalized street name (primary + alternate)
       function getVisibleHNsByStreet() {
         const map = new Map();
         const bounds = W.map.getExtent();
@@ -799,13 +800,14 @@
           const seg = W.model.segments.getObjectById(hn.attributes.segID);
           if (!seg) return;
 
-          const psid = seg.attributes.primaryStreetID;
-          if (!psid) return;
-          const st = W.model.streets.getObjectById(psid);
-          const name = st?.attributes?.name;
-          if (!name) return;
-
-          const sidNorm = name.toLowerCase().replace(/\s+/g, '_');
+          const streetIdSet = new Set();
+          if (seg.attributes.primaryStreetID) {
+            streetIdSet.add(seg.attributes.primaryStreetID);
+          }
+          (seg.attributes.streetIDs || []).forEach(id => {
+            if (id) streetIdSet.add(id);
+          });
+          if (!streetIdSet.size) return;
 
           const g = getHNGeometry(hn);
           let x, y;
@@ -815,15 +817,24 @@
           }
           if (x == null || y == null || !bounds.containsLonLat({ lon: x, lat: y })) return;
 
-          let entry = map.get(sidNorm);
-          if (!entry) {
-            entry = { set: new Set(), items: [] };
-            map.set(sidNorm, entry);
-          }
-
           const numRaw = String(hn.attributes.number).trim();
-          entry.set.add(numRaw);
-          entry.items.push({ num: numRaw, x, y });
+
+          streetIdSet.forEach(streetId => {
+            const st = W.model.streets.getObjectById(streetId);
+            const name = st?.attributes?.name;
+            if (!name) return;
+
+            const sidNorm = normalizeStreetName(name);
+
+            let entry = map.get(sidNorm);
+            if (!entry) {
+              entry = { set: new Set(), items: [] };
+              map.set(sidNorm, entry);
+            }
+
+            entry.set.add(numRaw);
+            entry.items.push({ num: numRaw, x, y });
+          });
         });
 
         return map;
