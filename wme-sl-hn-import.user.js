@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WME Quick HN Importer - Slovenia
 // @namespace    https://github.com/zigapovhe/wme-sl-hn-import
-// @version      0.9.5
+// @version      1.0.0
 // @description  Quickly add Slovenian house numbers with clickable overlays
 // @author       ThatByte
 // @downloadURL  https://raw.githubusercontent.com/zigapovhe/wme-sl-hn-import/main/wme-sl-hn-import.user.js
@@ -92,6 +92,8 @@
     let streetNameSpan = null;
     let currentStreetDiv = null;
 
+    let applyFeatureFilter = () => {};
+
     const layer = new OpenLayers.Layer.Vector(LAYER_NAME, {
       uniqueName: 'quick-hn-sl-importer',
       styleMap: new OpenLayers.StyleMap({
@@ -165,7 +167,17 @@
       if (!lastFeatures.length) return;
 
       const selection = W.selectionManager.getSegmentSelection();
-      if (!selection.segments || selection.segments.length === 0) return;
+
+      // No segment selected at all → clear highlight
+      if (!selection.segments || selection.segments.length === 0) {
+        if (currentStreetId !== null) {
+          currentStreetId = null;
+          if (currentStreetDiv) currentStreetDiv.style.display = 'none';
+          layer.redraw();
+          applyFeatureFilter();
+        }
+        return;
+      }
 
       const selectedStreetIds = new Set();
       selection.segments.forEach(seg => {
@@ -174,6 +186,17 @@
         }
         (seg.attributes.streetIDs || []).forEach(id => selectedStreetIds.add(id));
       });
+
+      // Segments, but no streets on them → clear highlight
+      if (selectedStreetIds.size === 0) {
+        if (currentStreetId !== null) {
+          currentStreetId = null;
+          if (currentStreetDiv) currentStreetDiv.style.display = 'none';
+          layer.redraw();
+          applyFeatureFilter();
+        }
+        return;
+      }
 
       const selectedStreetNames = Array.from(selectedStreetIds)
         .map(id => W.model.streets.getObjectById(id)?.attributes?.name)
@@ -186,25 +209,32 @@
         const sid = streets[name];
         if (!sid) return;
 
-        const count = lastFeatures.reduce((n, f) => n + (f.attributes?.street === sid ? 1 : 0), 0);
+        const count = lastFeatures.reduce(
+          (n, f) => n + (f.attributes?.street === sid ? 1 : 0),
+          0
+        );
         if (count > bestCount) {
           bestCount = count;
           newStreetId = sid;
         }
       });
 
-      if (newStreetId && newStreetId !== currentStreetId) {
+      // newStreetId can be null here – that means "no matching street"
+      if (newStreetId !== currentStreetId) {
         currentStreetId = newStreetId;
 
-        if (streetNameSpan && currentStreetDiv && streetNames[currentStreetId]) {
+        if (currentStreetId && streetNames[currentStreetId]) {
           streetNameSpan.textContent = streetNames[currentStreetId];
-          currentStreetDiv.style.display = 'block';
+          if (currentStreetDiv) currentStreetDiv.style.display = 'block';
+        } else if (currentStreetDiv) {
+          currentStreetDiv.style.display = 'none';
         }
 
         layer.redraw();
         applyFeatureFilter();
       }
     }
+
 
     // Click hit-test in pixel space (geometry EPSG:3857, W.map expects EPSG:4326)
     function handleMapClick(evt) {
@@ -516,9 +546,9 @@
           Green = selected street • Orange = other streets • Red = possible wrong HN • Faded = already in WME`;
       });
 
-      function applyFeatureFilter() {
-        const onlyMissing = isChecked(chkMissing);
-        const selectedOnly = isChecked(chkSelectedOnly);
+      applyFeatureFilter = function () {
+        const onlyMissing   = isChecked(chkMissing);
+        const selectedOnly  = isChecked(chkSelectedOnly);
 
         layer.removeAllFeatures();
         if (!lastFeatures.length) return;
@@ -534,7 +564,7 @@
         }
 
         layer.addFeatures(filtered);
-      }
+      };
 
       function recalculateFeatureStates() {
         if (!lastFeatures.length) return;
