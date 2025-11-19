@@ -92,6 +92,9 @@
     let streetNameSpan = null;
     let currentStreetDiv = null;
 
+    let chkMissing = null;
+    let chkSelectedOnly = null;
+
     let applyFeatureFilter = () => {};
 
     const layer = new OpenLayers.Layer.Vector(LAYER_NAME, {
@@ -167,31 +170,27 @@
       if (!lastFeatures.length) return;
 
       const selection = W.selectionManager.getSegmentSelection();
-
-      // No segment selected at all → clear highlight
       if (!selection.segments || selection.segments.length === 0) {
-        if (currentStreetId !== null) {
-          currentStreetId = null;
-          if (currentStreetDiv) currentStreetDiv.style.display = 'none';
-          layer.redraw();
-          applyFeatureFilter();
-        }
         return;
       }
 
       const selectedStreetIds = new Set();
+
       selection.segments.forEach(seg => {
-        if (seg.attributes.primaryStreetID) {
-          selectedStreetIds.add(seg.attributes.primaryStreetID);
-        }
-        (seg.attributes.streetIDs || []).forEach(id => selectedStreetIds.add(id));
+        const psid = seg.attributes.primaryStreetID;
+        if (psid && psid > 0) selectedStreetIds.add(psid);
+        (seg.attributes.streetIDs || []).forEach(id => {
+          if (id && id > 0) selectedStreetIds.add(id);
+        });
       });
 
-      // Segments, but no streets on them → clear highlight
       if (selectedStreetIds.size === 0) {
         if (currentStreetId !== null) {
           currentStreetId = null;
-          if (currentStreetDiv) currentStreetDiv.style.display = 'none';
+          if (streetNameSpan && currentStreetDiv) {
+            streetNameSpan.textContent = '—';
+            currentStreetDiv.style.display = 'none';
+          }
           layer.redraw();
           applyFeatureFilter();
         }
@@ -208,7 +207,6 @@
       selectedStreetNames.forEach(name => {
         const sid = streets[name];
         if (!sid) return;
-
         const count = lastFeatures.reduce(
           (n, f) => n + (f.attributes?.street === sid ? 1 : 0),
           0
@@ -219,20 +217,30 @@
         }
       });
 
-      // newStreetId can be null here – that means "no matching street"
-      if (newStreetId !== currentStreetId) {
-        currentStreetId = newStreetId;
-
-        if (currentStreetId && streetNames[currentStreetId]) {
-          streetNameSpan.textContent = streetNames[currentStreetId];
-          if (currentStreetDiv) currentStreetDiv.style.display = 'block';
-        } else if (currentStreetDiv) {
-          currentStreetDiv.style.display = 'none';
+      if (!newStreetId) {
+        if (currentStreetId !== null) {
+          currentStreetId = null;
+          if (streetNameSpan && currentStreetDiv) {
+            streetNameSpan.textContent = '—';
+            currentStreetDiv.style.display = 'none';
+          }
+          layer.redraw();
+          applyFeatureFilter();
         }
-
-        layer.redraw();
-        applyFeatureFilter();
+        return;
       }
+
+      if (newStreetId === currentStreetId) return;
+
+      currentStreetId = newStreetId;
+
+      if (streetNameSpan && currentStreetDiv && streetNames[currentStreetId]) {
+        streetNameSpan.textContent = streetNames[currentStreetId];
+        currentStreetDiv.style.display = 'block';
+      }
+
+      layer.redraw();
+      applyFeatureFilter();
     }
 
 
@@ -456,9 +464,9 @@
 
       const btnLoad    = tabPane.querySelector('#hn-load');
       const btnClear   = tabPane.querySelector('#hn-clear');
-      const chkVis     = tabPane.querySelector('#hn-toggle');
-      const chkMissing = tabPane.querySelector('#qhnsl-missing');
-      const chkSelectedOnly = tabPane.querySelector('#qhnsl-selected-only');
+      const chkVis = tabPane.querySelector('#hn-toggle');
+      chkMissing = tabPane.querySelector('#qhnsl-missing');
+      chkSelectedOnly = tabPane.querySelector('#qhnsl-selected-only');
       const bufferEl   = tabPane.querySelector('#qhnsl-buffer');
       const statusDiv  = tabPane.querySelector('#hn-status');
 
@@ -547,8 +555,8 @@
       });
 
       applyFeatureFilter = function () {
-        const onlyMissing   = isChecked(chkMissing);
-        const selectedOnly  = isChecked(chkSelectedOnly);
+        const onlyMissing = chkMissing?.hasAttribute('checked');
+        const selectedOnly = chkSelectedOnly?.hasAttribute('checked');
 
         layer.removeAllFeatures();
         if (!lastFeatures.length) return;
