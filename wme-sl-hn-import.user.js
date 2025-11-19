@@ -62,6 +62,18 @@
     );
   }
 
+  function getSegmentGeometry(seg) {
+    if (!seg) return null;
+    if (typeof seg.getOLGeometry === 'function') return seg.getOLGeometry();
+    return seg.geometry || seg.attributes?.geometry || null;
+  }
+
+  function getHNGeometry(hn) {
+    if (!hn) return null;
+    if (typeof hn.getOLGeometry === 'function') return hn.getOLGeometry();
+    return hn.geometry || hn.attributes?.geometry || null;
+  }
+
   function init() {
     let currentStreetId = null;
     let streetNames = {};
@@ -275,7 +287,10 @@
       let minDistance = Infinity;
 
       candidateSegments.forEach(segment => {
-        const distance = pointToLineDistance(point, segment.attributes.geometry);
+        const geom = getSegmentGeometry(segment);
+        if (!geom) return;
+
+        const distance = pointToLineDistance(point, geom);
         if (distance < minDistance) {
           minDistance = distance;
           nearestSegment = segment;
@@ -561,14 +576,31 @@
 
           let bounds = null;
           selection.segments.forEach(seg => {
-            bounds == null
-              ? (bounds = seg.attributes.geometry.getBounds())
-              : bounds.extend(seg.attributes.geometry.getBounds());
+            const g = getSegmentGeometry(seg);
+            if (!g) return;
+            const b = g.getBounds();
+            if (!b) return;
+
+            if (bounds == null) {
+              bounds = b.clone();
+            } else {
+              bounds.extend(b);
+            }
           });
+
+          if (!bounds) {
+            loading.style.display = 'none';
+            statusDiv.textContent = 'No geometry for selected segments.';
+            resolve();
+            return;
+          }
 
           const buffer = LS.getBuffer();
           const b = bounds.clone();
-          b.left -= buffer; b.right += buffer; b.bottom -= buffer; b.top += buffer;
+          b.left  -= buffer;
+          b.right += buffer;
+          b.bottom -= buffer;
+          b.top   += buffer;
 
           const bl = proj4('EPSG:3857', 'EPSG:3794', [b.left,  b.bottom]);
           const tr = proj4('EPSG:3857', 'EPSG:3794', [b.right, b.top]);
@@ -730,12 +762,13 @@
 
           const sidNorm = name.toLowerCase().replace(/\s+/g, '_');
 
-          const g = hn.geometry || hn.attributes.geometry;
+          const g = getHNGeometry(hn);
           let x, y;
           if (g && typeof g.x === 'number' && typeof g.y === 'number') {
-            x = g.x; y = g.y;
+            x = g.x;
+            y = g.y;
           }
-          if (!x || !y || !bounds.containsLonLat({ lon: x, lat: y })) return;
+          if (x == null || y == null || !bounds.containsLonLat({ lon: x, lat: y })) return;
 
           let entry = map.get(sidNorm);
           if (!entry) {
