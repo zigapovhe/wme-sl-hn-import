@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WME Quick HN Importer - Slovenia
 // @namespace    https://github.com/zigapovhe/wme-sl-hn-import
-// @version      0.9.5
+// @version      0.9.9
 // @description  Quickly add Slovenian house numbers with clickable overlays
 // @author       ThatByte
 // @downloadURL  https://raw.githubusercontent.com/zigapovhe/wme-sl-hn-import/main/wme-sl-hn-import.user.js
@@ -84,6 +84,10 @@
     let streetNameSpan = null;
     let currentStreetDiv = null;
 
+    let selectControl = null;
+    let lastZoom = W.map.getZoom();
+    let lastSelectionSegments = []; // stores last segment selection to "re-click" after zoom-in
+
     const layer = new OpenLayers.Layer.Vector(LAYER_NAME, {
       uniqueName: 'quick-hn-sl-importer',
       styleMap: new OpenLayers.StyleMap({
@@ -140,23 +144,60 @@
       const currentZoom = W.map.getZoom();
       const shouldBeVisible = userWantsLayerVisible && currentZoom >= 18;
 
-      if (layer.getVisibility() !== shouldBeVisible) {
-        layer.setVisibility(shouldBeVisible);
+      layer.setVisibility(shouldBeVisible);
 
-        if (userWantsLayerVisible && currentZoom < 18 && lastFeatures.length > 0) {
-          toast('Zoom in to level 18+ to see house numbers', 'info');
-        }
+      if (userWantsLayerVisible && currentZoom < 18 && lastFeatures.length > 0) {
+        toast('Zoom in to level 18+ to see house numbers', 'info');
       }
     }
 
-    W.map.events.register('zoomend', null, updateLayerVisibility);
-    W.map.events.register('moveend', null, updateLayerVisibility);
+    // Reproduce your "click segment, then click out" trick.
+    function reselectSavedStreetAfterZoomIn() {
+      if (!lastSelectionSegments.length) return;
+
+      try {
+        // 1) re-select last segments
+        W.selectionManager.setSelectedModels(lastSelectionSegments);
+        // 2) immediately clear selection (simulate click-out)
+        setTimeout(() => {
+          W.selectionManager.setSelectedModels([]);
+        }, 0);
+      } catch (e) {
+        console.warn('[SL-HN] Failed to reselect segments after zoom:', e);
+      }
+    }
+
+    // On zoom end, detect crossing from <18 back to >=18 and "re-click" selection
+    W.map.events.register('zoomend', null, () => {
+      const currentZoom = W.map.getZoom();
+      const wasBelow = lastZoom < 18;
+      const nowAboveOrEqual = currentZoom >= 18;
+
+      updateLayerVisibility();
+
+      if (userWantsLayerVisible && wasBelow && nowAboveOrEqual) {
+        reselectSavedStreetAfterZoomIn();
+      }
+
+      lastZoom = currentZoom;
+    });
+
+    // We keep moveend minimal now
+    W.map.events.register('moveend', null, () => {
+      // no-op for now, keeping it lean
+    });
+
     W.selectionManager.events.register('selectionchanged', null, onSelectionChanged);
 
     function onSelectionChanged() {
-      if (!lastFeatures.length) return;
-
       const selection = W.selectionManager.getSegmentSelection();
+
+      // Save last selection so we can "replay" it after zoom
+      if (selection.segments && selection.segments.length > 0) {
+        lastSelectionSegments = selection.segments.slice();
+      }
+
+      if (!lastFeatures.length) return;
       if (!selection.segments || selection.segments.length === 0) return;
 
       const selectedStreetIds = new Set();
@@ -198,7 +239,7 @@
       }
     }
 
-    const selectControl = new OpenLayers.Control.SelectFeature(layer, {
+    selectControl = new OpenLayers.Control.SelectFeature(layer, {
       onSelect: onFeatureSelect,
       hover: false,
       clickout: false,
@@ -251,6 +292,7 @@
           segmentId: nearestSegment.attributes.id
         });
 
+        console.log('[SL-HN] Added house number', houseNumber);
         toast(`Added house number ${houseNumber}`, 'success');
       } catch (err) {
         console.error('[SL-HN] Error adding house number:', err);
@@ -265,7 +307,10 @@
 
       if (matchName) {
         const matchingStreetIds = W.model.streets.getObjectArray()
-          .filter(street => street.attributes.name.toLowerCase() === streetName.toLowerCase())
+          .filter(street =>
+            street.attributes.name &&
+            street.attributes.name.toLowerCase() === streetName.toLowerCase()
+          )
           .map(street => street.attributes.id);
 
         if (matchingStreetIds.length === 0) {
