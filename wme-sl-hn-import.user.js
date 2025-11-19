@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         WME Quick HN Importer - Slovenia
 // @namespace    https://github.com/zigapovhe/wme-sl-hn-import
-// @version      0.9.0
-// @description  Display Slovenian house numbers on WME map for easy reference
+// @version      1.0.0
+// @description  Quickly add Slovenian house numbers with clickable overlays
 // @author       ThatByte
 // @downloadURL  https://raw.githubusercontent.com/zigapovhe/wme-sl-hn-import/main/wme-sl-hn-import.user.js
 // @updateURL    https://raw.githubusercontent.com/zigapovhe/wme-sl-hn-import/main/wme-sl-hn-import.user.js
@@ -21,19 +21,29 @@
 // @noframes
 // ==/UserScript==
 
-/* global W, OpenLayers, I18n, proj4, getWmeSdk */
+/*
+ * Click handling and nearest segment matching based on work by
+ * Tom 'Glodenox' Puttemans (https://github.com/Glodenox/wme-quick-hn-importer)
+ */
+
+/* global W, OpenLayers, I18n, proj4, getWmeSdk, unsafeWindow */
 
 (function () {
   'use strict';
 
   let wmeSDK;
+  const LAYER_NAME = 'Quick HN Importer - Slovenia';
 
-  // LocalStorage helpers
+  const MAX_CLICK_DISTANCE_PX = 25;
+  const MAX_HN_CONFLICT_DISTANCE = 10;
+
   const LS = {
     getBuffer()       { return Number(localStorage.getItem('qhnsl-buffer') ?? '500'); },
     setBuffer(v)      { localStorage.setItem('qhnsl-buffer', String(v)); },
     getLayerVisible() { return localStorage.getItem('qhnsl-layer-visible') === '1'; },
-    setLayerVisible(v){ localStorage.setItem('qhnsl-layer-visible', v ? '1' : '0'); }
+    setLayerVisible(v){ localStorage.setItem('qhnsl-layer-visible', v ? '1' : '0'); },
+    getSelectedOnly() { return localStorage.getItem('qhnsl-selected-only') === '1'; },
+    setSelectedOnly(v){ localStorage.setItem('qhnsl-selected-only', v ? '1' : '0'); }
   };
 
   const toast = (msg, type = 'info') => {
@@ -43,10 +53,12 @@
       } else {
         console.info(`[SL-HN] ${msg}`);
       }
-    } catch (_) { console.info(`[SL-HN] ${msg}`); }
+    } catch (_) {
+      console.info(`[SL-HN] ${msg}`);
+    }
   };
 
-  // Slovenian CRS (define once)
+  // EPSG:3794 definition (Slovenia)
   if (!proj4.defs['EPSG:3794']) {
     proj4.defs(
       'EPSG:3794',
@@ -54,18 +66,20 @@
     );
   }
 
-  // Boot when WME + SDK are ready
-  function bootstrap() {
-    if (!document.getElementById('edit-panel') || !W || !W.map || !W.model) {
-      setTimeout(bootstrap, 250);
-      return;
-    }
+  function normalizeStreetName(name) {
+    return String(name).toLowerCase().replace(/\s+/g, '_');
+  }
 
-    if (wmeSDK.State.isReady) {
-      init();
-    } else {
-      wmeSDK.Events.once({ eventName: 'wme-ready' }).then(init);
-    }
+  function getSegmentGeometry(seg) {
+    if (!seg) return null;
+    if (typeof seg.getOLGeometry === 'function') return seg.getOLGeometry();
+    return seg.geometry || seg.attributes?.geometry || null;
+  }
+
+  function getHNGeometry(hn) {
+    if (!hn) return null;
+    if (typeof hn.getOLGeometry === 'function') return hn.getOLGeometry();
+    return hn.geometry || hn.attributes?.geometry || null;
   }
 
   function init() {
@@ -74,9 +88,16 @@
     let streets = {};
     let lastFeatures = [];
     let isLoading = false;
+    let userWantsLayerVisible = false;
+    let streetNameSpan = null;
+    let currentStreetDiv = null;
 
-    // Map layer
-    const layer = new OpenLayers.Layer.Vector('SL-HN', {
+    let chkMissing = null;
+    let chkSelectedOnly = null;
+
+    let applyFeatureFilter = () => {};
+
+    const layer = new OpenLayers.Layer.Vector(LAYER_NAME, {
       uniqueName: 'quick-hn-sl-importer',
       styleMap: new OpenLayers.StyleMap({
         default: new OpenLayers.Style(
@@ -91,22 +112,26 @@
             pointRadius: '${radius}',
             label: '${number}',
             title: '${title}',
+            cursor: '${cursor}',
           },
           {
             context: {
               fillColor: f => {
                 const a = f.attributes || {};
-                if (a.conflict) return '#ff6666';                              // red = suspected wrong HN in WME
-                return (a.street === currentStreetId) ? '#99ee99' : '#cccccc';  // green = selected street, gray = other
+                if (a.conflict) return '#ff6666';
+                return (a.street === currentStreetId) ? '#99ee99' : '#fb9c4f';
               },
               radius: f => (f.attributes && f.attributes.number)
-                ? Math.max(f.attributes.number.length * 6, 10)
-                : 10,
-              // fade only exact matches on the selected street
+                ? Math.max(f.attributes.number.length * 7, 12)
+                : 12,
               opacity: f => {
                 const a = f.attributes || {};
                 if (a.conflict) return 1;
                 return (currentStreetId && a.street === currentStreetId && a.processed) ? 0.3 : 1;
+              },
+              cursor: f => {
+                const a = f.attributes || {};
+                return (a.processed) ? '' : 'pointer';
               },
               title: f => (f.attributes && f.attributes.number && f.attributes.street)
                 ? `${streetNames[f.attributes.street]} ${f.attributes.number}`
@@ -120,10 +145,285 @@
     try {
       I18n.translations[I18n.currentLocale()].layers.name['quick-hn-sl-importer'] = 'Quick HN Importer';
     } catch (_) {}
+
     layer.setVisibility(false);
     W.map.addLayer(layer);
 
-    // Inline loader
+    function updateLayerVisibility() {
+      const currentZoom = W.map.getZoom();
+      const shouldBeVisible = userWantsLayerVisible && currentZoom >= 18;
+
+      if (layer.getVisibility() !== shouldBeVisible) {
+        layer.setVisibility(shouldBeVisible);
+
+        if (userWantsLayerVisible && currentZoom < 18 && lastFeatures.length > 0) {
+          toast('Zoom in to level 18+ to see house numbers', 'info');
+        }
+      }
+    }
+
+    W.map.events.register('zoomend', null, updateLayerVisibility);
+    W.map.events.register('moveend', null, updateLayerVisibility);
+    W.selectionManager.events.register('selectionchanged', null, onSelectionChanged);
+
+    function onSelectionChanged() {
+      if (!lastFeatures.length) return;
+
+      const selection = W.selectionManager.getSegmentSelection();
+      if (!selection.segments || selection.segments.length === 0) {
+        return;
+      }
+
+      const selectedStreetIds = new Set();
+
+      selection.segments.forEach(seg => {
+        const psid = seg.attributes.primaryStreetID;
+        if (psid && psid > 0) selectedStreetIds.add(psid);
+        (seg.attributes.streetIDs || []).forEach(id => {
+          if (id && id > 0) selectedStreetIds.add(id);
+        });
+      });
+
+      if (selectedStreetIds.size === 0) {
+        if (currentStreetId !== null) {
+          currentStreetId = null;
+          if (streetNameSpan && currentStreetDiv) {
+            streetNameSpan.textContent = '—';
+            currentStreetDiv.style.display = 'none';
+          }
+          layer.redraw();
+          applyFeatureFilter();
+        }
+        return;
+      }
+
+      const selectedStreetNames = Array.from(selectedStreetIds)
+        .map(id => W.model.streets.getObjectById(id)?.attributes?.name)
+        .filter(Boolean);
+
+      let newStreetId = null;
+      let bestCount = -1;
+
+      selectedStreetNames.forEach(name => {
+        const sid = streets[name];
+        if (!sid) return;
+        const count = lastFeatures.reduce(
+          (n, f) => n + (f.attributes?.street === sid ? 1 : 0),
+          0
+        );
+        if (count > bestCount) {
+          bestCount = count;
+          newStreetId = sid;
+        }
+      });
+
+      if (!newStreetId) {
+        if (currentStreetId !== null) {
+          currentStreetId = null;
+          if (streetNameSpan && currentStreetDiv) {
+            streetNameSpan.textContent = '—';
+            currentStreetDiv.style.display = 'none';
+          }
+          layer.redraw();
+          applyFeatureFilter();
+        }
+        return;
+      }
+
+      if (newStreetId === currentStreetId) return;
+
+      currentStreetId = newStreetId;
+
+      if (streetNameSpan && currentStreetDiv && streetNames[currentStreetId]) {
+        streetNameSpan.textContent = streetNames[currentStreetId];
+        currentStreetDiv.style.display = 'block';
+      }
+
+      layer.redraw();
+      applyFeatureFilter();
+    }
+
+
+    // Click hit-test in pixel space (geometry EPSG:3857, W.map expects EPSG:4326)
+    function handleMapClick(evt) {
+      if (!layer.getVisibility() || !layer.features || !layer.features.length) return;
+
+      const clickPx = evt.xy;
+      if (!clickPx) return;
+
+      const features = layer.features;
+      const MAX_PIXELS_SQ = MAX_CLICK_DISTANCE_PX * MAX_CLICK_DISTANCE_PX;
+
+      let bestFeature = null;
+      let bestDistSq = Infinity;
+
+      for (let i = 0; i < features.length; i++) {
+        const f = features[i];
+        const g = f.geometry;
+        if (!g) continue;
+
+        let lonLat;
+        try {
+          const [lon, lat] = proj4('EPSG:3857', 'EPSG:4326', [g.x, g.y]);
+          lonLat = new OpenLayers.LonLat(lon, lat);
+        } catch (e) {
+          console.warn('[SL-HN] Failed to transform point for hit-test:', e);
+          continue;
+        }
+
+        const fPx = W.map.getPixelFromLonLat(lonLat);
+        if (!fPx) continue;
+
+        const dx = fPx.x - clickPx.x;
+        const dy = fPx.y - clickPx.y;
+        const d2 = dx * dx + dy * dy;
+
+        if (d2 <= MAX_PIXELS_SQ && d2 < bestDistSq) {
+          bestDistSq = d2;
+          bestFeature = f;
+        }
+      }
+
+      if (!bestFeature) return;
+
+      onFeatureClick(bestFeature);
+    }
+
+    W.map.events.register('click', null, handleMapClick);
+
+    function onFeatureClick(feature) {
+      const attrs = feature.attributes || {};
+      if (attrs.processed) return;
+
+      const streetName = streetNames[attrs.street];
+      const houseNumber = attrs.number;
+
+      let nearestSegment = findNearestSegment(feature, streetName, true);
+
+      if (!nearestSegment) {
+        nearestSegment = findNearestSegment(feature, streetName, false);
+
+        if (!nearestSegment) {
+          toast('No nearby segment found', 'warning');
+          return;
+        }
+
+        const nearestStreet = W.model.streets.getObjectById(nearestSegment.attributes.primaryStreetID);
+        const nearestStreetName = nearestStreet?.attributes?.name || 'Unknown';
+
+        if (!confirm(`Street name "${streetName}" could not be found.\n\nDo you want to add this number to "${nearestStreetName}"?`)) {
+          return;
+        }
+      }
+
+      W.selectionManager.setSelectedModels([nearestSegment]);
+
+      try {
+        const [lon, lat] = proj4('EPSG:3857', 'EPSG:4326', [feature.geometry.x, feature.geometry.y]);
+
+        const geojsonGeometry = {
+          type: 'Point',
+          coordinates: [lon, lat]
+        };
+
+        wmeSDK.DataModel.HouseNumbers.addHouseNumber({
+          number: houseNumber,
+          point: geojsonGeometry,
+          segmentId: nearestSegment.attributes.id
+        });
+
+        console.log('[SL-HN] Added house number', houseNumber);
+        toast(`Added house number ${houseNumber}`, 'success');
+      } catch (err) {
+        console.error('[SL-HN] Error adding house number:', err);
+        toast('Error adding house number. See console.', 'error');
+      }
+    }
+
+    function findNearestSegment(feature, streetName, matchName) {
+      const point = feature.geometry;
+      const allSegments = W.model.segments.getObjectArray();
+      let candidateSegments = allSegments;
+
+      if (matchName) {
+        const matchingStreetIds = W.model.streets.getObjectArray()
+          .filter(street => street.attributes.name.toLowerCase() === streetName.toLowerCase())
+          .map(street => street.attributes.id);
+
+        if (matchingStreetIds.length === 0) {
+          return null;
+        }
+
+        candidateSegments = allSegments.filter(segment => {
+          const primaryMatch = matchingStreetIds.includes(segment.attributes.primaryStreetID);
+          const altMatch = (segment.attributes.streetIDs || []).some(id => matchingStreetIds.includes(id));
+          return primaryMatch || altMatch;
+        });
+      }
+
+      if (candidateSegments.length === 0) {
+        return null;
+      }
+
+      let nearestSegment = null;
+      let minDistance = Infinity;
+
+      candidateSegments.forEach(segment => {
+        const geom = getSegmentGeometry(segment);
+        if (!geom) return;
+
+        const distance = pointToLineDistance(point, geom);
+        if (distance < minDistance) {
+          minDistance = distance;
+          nearestSegment = segment;
+        }
+      });
+
+      return nearestSegment;
+    }
+
+    function pointToLineDistance(point, line) {
+      const px = point.x;
+      const py = point.y;
+      const coords = line.getVertices();
+
+      let minDist = Infinity;
+
+      for (let i = 0; i < coords.length - 1; i++) {
+        const x1 = coords[i].x;
+        const y1 = coords[i].y;
+        const x2 = coords[i + 1].x;
+        const y2 = coords[i + 1].y;
+
+        const dist = pointToSegmentDistance(px, py, x1, y1, x2, y2);
+        minDist = Math.min(minDist, dist);
+      }
+
+      return minDist;
+    }
+
+    function pointToSegmentDistance(px, py, x1, y1, x2, y2) {
+      const dx = x2 - x1;
+      const dy = y2 - y1;
+      const lengthSquared = dx * dx + dy * dy;
+
+      if (lengthSquared === 0) {
+        const dpx = px - x1;
+        const dpy = py - y1;
+        return Math.sqrt(dpx * dpx + dpy * dpy);
+      }
+
+      let t = ((px - x1) * dx + (py - y1) * dy) / lengthSquared;
+      t = Math.max(0, Math.min(1, t));
+
+      const closestX = x1 + t * dx;
+      const closestY = y1 + t * dy;
+
+      const dpx = px - closestX;
+      const dpy = py - closestY;
+      return Math.sqrt(dpx * dpx + dpy * dpy);
+    }
+
     const loading = document.createElement('div');
     loading.style.position = 'absolute';
     loading.style.bottom = '35px';
@@ -134,7 +434,6 @@
       '<div style="margin:0 auto; max-width:300px; text-align:center; background:rgba(0, 0, 0, 0.5); color:white; border-radius:3px; padding:5px 15px;"><i class="fa fa-pulse fa-spinner"></i> Loading address points</div>';
     document.getElementById('map').appendChild(loading);
 
-    // Scripts tab UI
     wmeSDK.Sidebar.registerScriptTab().then(({ tabLabel, tabPane }) => {
       tabLabel.innerText = 'SL-HN';
       tabLabel.title = 'Quick HN Importer (Slovenia)';
@@ -146,50 +445,73 @@
             <button id="hn-load" class="wz-button">Load selected street</button>
             <button id="hn-clear" class="wz-button wz-button--secondary">Clear</button>
           </div>
-          <div style="display:flex;gap:12px;align-items:center;">
+          <div id="hn-current-street" style="margin:8px 0;padding:8px;background:#f0f0f0;border-radius:4px;font-size:13px;display:none;">
+            <b>Current street:</b> <span id="hn-street-name" style="color:#2a7;font-weight:bold;">—</span>
+          </div>
+          <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
             <wz-checkbox id="hn-toggle">Show layer</wz-checkbox>
             <wz-checkbox id="qhnsl-missing">Show only missing</wz-checkbox>
+            <wz-checkbox id="qhnsl-selected-only">Selected street only</wz-checkbox>
             <span style="font-size:12px;">Buffer (m): <input id="qhnsl-buffer" type="number" min="0" step="50" style="width:80px;margin-left:6px"></span>
           </div>
           <div id="hn-status" style="margin-top:10px;font-size:12px;color:#666;line-height:1.4;">
             <b>Instructions</b><br/>
-            1) Select a segment • 2) Click "Load selected street" • Green = selected street • Gray = other streets • Red = possible wrong HN in WME • Faded = already in WME
+            1) Select a segment • 2) Click "Load selected street" • 3) <b>Click house numbers on map to add them</b><br/>
+            Green = selected street • Orange = other streets • Red = possible wrong HN • Faded = already in WME
           </div>
         </div>
       `;
 
       const btnLoad    = tabPane.querySelector('#hn-load');
       const btnClear   = tabPane.querySelector('#hn-clear');
-      const chkVis     = tabPane.querySelector('#hn-toggle');
-      const chkMissing = tabPane.querySelector('#qhnsl-missing');
+      const chkVis = tabPane.querySelector('#hn-toggle');
+      chkMissing = tabPane.querySelector('#qhnsl-missing');
+      chkSelectedOnly = tabPane.querySelector('#qhnsl-selected-only');
       const bufferEl   = tabPane.querySelector('#qhnsl-buffer');
       const statusDiv  = tabPane.querySelector('#hn-status');
 
+      currentStreetDiv = tabPane.querySelector('#hn-current-street');
+      streetNameSpan = tabPane.querySelector('#hn-street-name');
+
       const isChecked  = (el) => el?.hasAttribute('checked');
-      const setChecked = (el, v) => v ? el.setAttribute('checked','') : el.removeAttribute('checked');
+      const setChecked = (el, v) => v ? el.setAttribute('checked', '') : el.removeAttribute('checked');
 
       bufferEl.value = String(LS.getBuffer());
       if (LS.getLayerVisible()) {
         setChecked(chkVis, true);
-        layer.setVisibility(true);
+        userWantsLayerVisible = true;
+        updateLayerVisibility();
+      }
+      if (LS.getSelectedOnly()) {
+        setChecked(chkSelectedOnly, true);
       }
 
       bufferEl.addEventListener('change', () => {
         const val = Number(bufferEl.value);
-        if (!Number.isFinite(val) || val < 0) { bufferEl.value = String(LS.getBuffer()); return; }
+        if (!Number.isFinite(val) || val < 0) {
+          bufferEl.value = String(LS.getBuffer());
+          return;
+        }
         LS.setBuffer(val);
       });
 
       chkVis.addEventListener('click', () => {
         const on = isChecked(chkVis);
         setChecked(chkVis, !on);
-        layer.setVisibility(!on);
+        userWantsLayerVisible = !on;
         LS.setLayerVisible(!on);
+        updateLayerVisibility();
       });
 
-      // Toggle "only missing" -> re-apply filter
       chkMissing.addEventListener('click', () => {
         setChecked(chkMissing, !isChecked(chkMissing));
+        applyFeatureFilter();
+      });
+
+      chkSelectedOnly.addEventListener('click', () => {
+        const newState = !isChecked(chkSelectedOnly);
+        setChecked(chkSelectedOnly, newState);
+        LS.setSelectedOnly(newState);
         applyFeatureFilter();
       });
 
@@ -205,10 +527,11 @@
         currentStreetId = null;
         lastFeatures = [];
 
-        await updateLayer(statusDiv).catch(()=>{});
-        layer.setVisibility(true);
+        await updateLayer(statusDiv).catch(() => {});
+        userWantsLayerVisible = true;
         setChecked(chkVis, true);
         LS.setLayerVisible(true);
+        updateLayerVisibility();
 
         btnLoad.disabled = false;
         btnLoad.textContent = 'Load selected street';
@@ -217,6 +540,7 @@
 
       btnClear.addEventListener('click', () => {
         layer.removeAllFeatures();
+        userWantsLayerVisible = false;
         layer.setVisibility(false);
         setChecked(chkVis, false);
         LS.setLayerVisible(false);
@@ -224,23 +548,31 @@
         streetNames = {};
         currentStreetId = null;
         lastFeatures = [];
+        currentStreetDiv.style.display = 'none';
         statusDiv.innerHTML = `<b>Instructions</b><br/>
-          1) Select a segment • 2) Click "Load selected street" • Green = selected street • Gray = other streets • Red = possible wrong HN in WME • Faded = already in WME`;
+          1) Select a segment • 2) Click "Load selected street" • 3) <b>Click house numbers on map to add them</b><br/>
+          Green = selected street • Orange = other streets • Red = possible wrong HN • Faded = already in WME`;
       });
 
-      function applyFeatureFilter() {
-        const onlyMissing = isChecked(chkMissing);
+      applyFeatureFilter = function () {
+        const onlyMissing = chkMissing?.hasAttribute('checked');
+        const selectedOnly = chkSelectedOnly?.hasAttribute('checked');
+
         layer.removeAllFeatures();
         if (!lastFeatures.length) return;
 
-        if (onlyMissing) {
-          // Keep conflicts OR not-processed; hide exact matches only
-          const filtered = lastFeatures.filter(f => f.attributes?.conflict || !f.attributes?.processed);
-          layer.addFeatures(filtered);
-        } else {
-          layer.addFeatures(lastFeatures);
+        let filtered = lastFeatures;
+
+        if (selectedOnly && currentStreetId) {
+          filtered = filtered.filter(f => f.attributes?.street === currentStreetId);
         }
-      }
+
+        if (onlyMissing) {
+          filtered = filtered.filter(f => f.attributes?.conflict || !f.attributes?.processed);
+        }
+
+        layer.addFeatures(filtered);
+      };
 
       function recalculateFeatureStates() {
         if (!lastFeatures.length) return;
@@ -254,19 +586,16 @@
           const wx = feature.geometry.x;
           const wy = feature.geometry.y;
 
-          // Recalculate processed state
           const entry = selectionHNMap.get(streetId);
           const processed = entry?.set.has(hn) === true;
 
-          // Recalculate conflict state
           let conflict = false;
           if (!processed && entry?.items?.length) {
-            const MAX_M = 10; // distance threshold
             for (const it of entry.items) {
               if (!it || it.x == null || it.y == null) continue;
               if (it.num !== hn) {
                 const dx = wx - it.x, dy = wy - it.y;
-                if (dx*dx + dy*dy <= MAX_M*MAX_M) {
+                if (dx*dx + dy*dy <= MAX_HN_CONFLICT_DISTANCE * MAX_HN_CONFLICT_DISTANCE) {
                   conflict = true;
                   break;
                 }
@@ -279,8 +608,6 @@
         });
 
         layer.redraw();
-
-        console.log('[SL-HN] Feature states recalculated');
       }
 
       function setupHouseNumberEventListeners() {
@@ -294,39 +621,28 @@
         events.forEach(eventName => {
           wmeSDK.Events.on({
             eventName,
-            eventHandler: (event) => {
-              // Only recalculate if we have loaded features
+            eventHandler: () => {
               if (lastFeatures.length > 0) {
-                console.log(`[SL-HN] ${eventName} detected, recalculating states...`);
                 recalculateFeatureStates();
-                // Reapply filter if "show only missing" is checked
                 applyFeatureFilter();
               }
             }
           });
         });
 
-        // Also listen for map data loaded (viewport changes, zoom, refresh)
         wmeSDK.Events.on({
           eventName: 'wme-map-data-loaded',
           eventHandler: () => {
-            // Only recalculate if we have loaded features
             if (lastFeatures.length > 0) {
-              console.log('[SL-HN] Map data loaded, recalculating states...');
               recalculateFeatureStates();
-              // Reapply filter if "show only missing" is checked
               applyFeatureFilter();
             }
           }
         });
-
-        console.log('[SL-HN] House number event listeners registered');
       }
 
-      // Set up event listeners after SDK is ready
       setupHouseNumberEventListeners();
 
-      // -------- Data loading (GML only) --------
       function updateLayer(statusDiv) {
         return new Promise((resolve) => {
           const selection = W.selectionManager.getSegmentSelection();
@@ -339,20 +655,34 @@
 
           loading.style.display = null;
 
-          // Bounds of selected segments
           let bounds = null;
           selection.segments.forEach(seg => {
-            bounds == null
-              ? (bounds = seg.attributes.geometry.getBounds())
-              : bounds.extend(seg.attributes.geometry.getBounds());
+            const g = getSegmentGeometry(seg);
+            if (!g) return;
+            const b = g.getBounds();
+            if (!b) return;
+
+            if (bounds == null) {
+              bounds = b.clone();
+            } else {
+              bounds.extend(b);
+            }
           });
 
-          // buffer
+          if (!bounds) {
+            loading.style.display = 'none';
+            statusDiv.textContent = 'No geometry for selected segments.';
+            resolve();
+            return;
+          }
+
           const buffer = LS.getBuffer();
           const b = bounds.clone();
-          b.left -= buffer; b.right += buffer; b.bottom -= buffer; b.top += buffer;
+          b.left  -= buffer;
+          b.right += buffer;
+          b.bottom -= buffer;
+          b.top   += buffer;
 
-          // Transform to EPSG:3794 for WFS
           const bl = proj4('EPSG:3857', 'EPSG:3794', [b.left,  b.bottom]);
           const tr = proj4('EPSG:3857', 'EPSG:3794', [b.right, b.top]);
 
@@ -367,7 +697,6 @@
             url: urlGml,
             onload: function (response) {
               try {
-                // Parse GML
                 const parser = new DOMParser();
                 const xmlDoc = parser.parseFromString(response.responseText, 'text/xml');
                 const addresses = xmlDoc.getElementsByTagNameNS(
@@ -380,14 +709,12 @@
                 for (let i = 0; i < addresses.length; i++) {
                   const address = addresses[i];
 
-                  // Coordinates
                   const pos = address.getElementsByTagNameNS('http://www.opengis.net/gml/3.2', 'pos')[0];
                   if (!pos) continue;
                   const coords = pos.textContent.trim().split(' ');
                   const [x3794, y3794] = coords.map(parseFloat);
                   const [wx, wy] = proj4('EPSG:3794', 'EPSG:3857', [x3794, y3794]);
 
-                  // House number (lowercase)
                   const designators = address.getElementsByTagNameNS(
                     'http://inspire.ec.europa.eu/schemas/ad/4.0',
                     'designator'
@@ -399,7 +726,6 @@
                   }
                   if (!hn) continue;
 
-                  // Street name
                   const components = address.getElementsByTagNameNS(
                     'http://inspire.ec.europa.eu/schemas/ad/4.0',
                     'component'
@@ -412,26 +738,26 @@
                   }
                   if (!streetName) continue;
 
-                  const streetId = streetName.toLowerCase().replace(/\s+/g, '_');
+                  const streetId = normalizeStreetName(streetName);
                   if (!streets[streetName]) {
                     streets[streetName]   = streetId;
                     streetNames[streetId] = streetName;
                   }
 
-                  // processed = exact same HN already on this street (case-insensitive via normalization)
                   const entry = selectionHNMap.get(streetId);
                   const processed = entry?.set.has(hn) === true;
 
-                  // conflict = a different HN already exists very close (same house, wrong number)
                   let conflict = false;
                   if (!processed && entry?.items?.length) {
                     const epX = wx, epY = wy;
-                    const MAX_M = 10; // distance threshold in meters (EPSG:3857 approx)
                     for (const it of entry.items) {
                       if (!it || it.x == null || it.y == null) continue;
                       if (it.num !== hn) {
                         const dx = epX - it.x, dy = epY - it.y;
-                        if (dx*dx + dy*dy <= MAX_M*MAX_M) { conflict = true; break; }
+                        if (dx*dx + dy*dy <= MAX_HN_CONFLICT_DISTANCE * MAX_HN_CONFLICT_DISTANCE) {
+                          conflict = true;
+                          break;
+                        }
                       }
                     }
                   }
@@ -446,7 +772,6 @@
                   );
                 }
 
-                // choose best street among selected segments
                 const allStreetIds = new Set();
                 selection.segments.forEach(seg => {
                   (seg.attributes.streetIDs || []).forEach(id => allStreetIds.add(id));
@@ -474,15 +799,18 @@
 
                 lastFeatures = features;
 
-                layer.removeAllFeatures();
-                if (chkMissing.hasAttribute('checked')) {
-                  layer.addFeatures(lastFeatures.filter(f => f.attributes?.conflict || !f.attributes?.processed));
+                if (currentStreetId && streetNames[currentStreetId]) {
+                  streetNameSpan.textContent = streetNames[currentStreetId];
+                  currentStreetDiv.style.display = 'block';
                 } else {
-                  layer.addFeatures(lastFeatures);
+                  currentStreetDiv.style.display = 'none';
                 }
 
+                layer.removeAllFeatures();
+                applyFeatureFilter();
+
                 loading.style.display = 'none';
-                statusDiv.textContent = `Loaded ${lastFeatures.length} address points. Green = selected street • Gray = other streets • Red = possible wrong HN in WME`;
+                statusDiv.innerHTML = `Loaded ${lastFeatures.length} address points.<br/><b>Click numbers on map to add them!</b><br/>Green = selected • Orange = other • Red = possible wrong HN`;
                 resolve();
               } catch (err) {
                 fail(err);
@@ -501,47 +829,59 @@
         });
       }
 
-      // Returns all HNs visible in current WME view, not only selected segments
+      // Visible HNs grouped by normalized street name (primary + alternate)
       function getVisibleHNsByStreet() {
         const map = new Map();
-
-        // Get visible bounds in EPSG:3857
         const bounds = W.map.getExtent();
 
         W.model.segmentHouseNumbers.getObjectArray().forEach(hn => {
           const seg = W.model.segments.getObjectById(hn.attributes.segID);
           if (!seg) return;
 
-          const psid = seg.attributes.primaryStreetID;
-          if (!psid) return;
-          const st = W.model.streets.getObjectById(psid);
-          const name = st?.attributes?.name;
-          if (!name) return;
+          const streetIdSet = new Set();
+          if (seg.attributes.primaryStreetID) {
+            streetIdSet.add(seg.attributes.primaryStreetID);
+          }
+          (seg.attributes.streetIDs || []).forEach(id => {
+            if (id) streetIdSet.add(id);
+          });
+          if (!streetIdSet.size) return;
 
-          const sidNorm = name.toLowerCase().replace(/\s+/g, '_');
-
-          // Basic position check (only include HNs in visible bounds)
-          const g = hn.geometry || hn.attributes.geometry;
+          const g = getHNGeometry(hn);
           let x, y;
-          if (g && typeof g.x === 'number' && typeof g.y === 'number') { x = g.x; y = g.y; }
-          if (!x || !y || !bounds.containsLonLat({ lon: x, lat: y })) return;
-
-          let entry = map.get(sidNorm);
-          if (!entry) { entry = { set: new Set(), items: [] }; map.set(sidNorm, entry); }
+          if (g && typeof g.x === 'number' && typeof g.y === 'number') {
+            x = g.x;
+            y = g.y;
+          }
+          if (x == null || y == null || !bounds.containsLonLat({ lon: x, lat: y })) return;
 
           const numRaw = String(hn.attributes.number).trim();
-          entry.set.add(numRaw);
-          entry.items.push({ num: numRaw, x, y });
+
+          streetIdSet.forEach(streetId => {
+            const st = W.model.streets.getObjectById(streetId);
+            const name = st?.attributes?.name;
+            if (!name) return;
+
+            const sidNorm = normalizeStreetName(name);
+
+            let entry = map.get(sidNorm);
+            if (!entry) {
+              entry = { set: new Set(), items: [] };
+              map.set(sidNorm, entry);
+            }
+
+            entry.set.add(numRaw);
+            entry.items.push({ num: numRaw, x, y });
+          });
         });
 
         return map;
       }
-    }); // end registerScriptTab
+    });
   }
 
-  // Initialize the WME Scripts SDK
-  (('unsafeWindow' in window ? window.unsafeWindow : window).SDK_INITIALIZED).then(() => {
+  (unsafeWindow || window).SDK_INITIALIZED.then(() => {
     wmeSDK = getWmeSdk({ scriptId: 'quick-hn-sl-importer', scriptName: 'Quick HN Importer (SI)' });
-    bootstrap();
+    wmeSDK.Events.once({ eventName: 'wme-ready' }).then(init);
   });
 })();
