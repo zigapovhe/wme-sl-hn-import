@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WME Quick HN Importer - Slovenia
 // @namespace    https://github.com/zigapovhe/wme-sl-hn-import
-// @version      1.0.0
+// @version      2.0.0
 // @description  Quickly add Slovenian house numbers with clickable overlays
 // @author       ThatByte
 // @downloadURL  https://raw.githubusercontent.com/zigapovhe/wme-sl-hn-import/main/wme-sl-hn-import.user.js
@@ -13,7 +13,7 @@
 // @match        https://www.waze.com/*/editor*
 // @match        https://beta.waze.com/*
 // @exclude      https://www.waze.com/user/editor*
-// @connect      storitve.eprostor.gov.si
+// @connect      ipi.eprostor.gov.si
 // @connect      raw.githubusercontent.com
 // @require      https://cdnjs.cloudflare.com/ajax/libs/proj4js/2.9.0/proj4.js
 // @grant        GM_xmlhttpRequest
@@ -37,6 +37,10 @@
   const MAX_CLICK_DISTANCE_PX = 25;
   const MAX_HN_CONFLICT_DISTANCE = 10;
 
+  // EProstor API configuration
+  const EPROSTOR_API = 'https://ipi.eprostor.gov.si/wfs-si-gurs-rn/ogc/features/collections/SI.GURS.RN:REGISTER_NASLOVOV/items';
+  const EPROSTOR_LIMIT = 1000;
+
   const LS = {
     getBuffer()       { return Number(localStorage.getItem('qhnsl-buffer') ?? '500'); },
     setBuffer(v)      { localStorage.setItem('qhnsl-buffer', String(v)); },
@@ -58,7 +62,7 @@
     }
   };
 
-  // EPSG:3794 definition (Slovenia)
+  // EPSG:3794 definition (Slovenia D96/TM)
   if (!proj4.defs['EPSG:3794']) {
     proj4.defs(
       'EPSG:3794',
@@ -80,6 +84,75 @@
     if (!hn) return null;
     if (typeof hn.getOLGeometry === 'function') return hn.getOLGeometry();
     return hn.geometry || hn.attributes?.geometry || null;
+  }
+
+  // Build house number string from components
+  function buildHouseNumber(stevilka, dodatek) {
+    let hn = String(stevilka || '').trim();
+    if (dodatek) {
+      hn += String(dodatek).trim();
+    }
+    return hn.toLowerCase();
+  }
+
+  // Build CQL filter for coordinate bounds (excludes apartments)
+  function buildCqlFilter(minE, minN, maxE, maxN) {
+    return `E>=${minE} AND E<=${maxE} AND N>=${minN} AND N<=${maxN} AND ST_STANOVANJA IS NULL`;
+  }
+
+  // Fetch addresses from EProstor API with pagination
+  function fetchAddresses(minE, minN, maxE, maxN) {
+    return new Promise((resolve, reject) => {
+      const allFeatures = [];
+      let startIndex = 0;
+
+      function fetchPage() {
+        const filter = buildCqlFilter(minE, minN, maxE, maxN);
+        const url = EPROSTOR_API +
+          '?f=application/json' +
+          '&limit=' + EPROSTOR_LIMIT +
+          '&startIndex=' + startIndex +
+          '&filter=' + encodeURIComponent(filter) +
+          '&filter-lang=cql-text';
+
+        GM_xmlhttpRequest({
+          method: 'GET',
+          url: url,
+          onload: function (response) {
+            try {
+              const data = JSON.parse(response.responseText);
+
+              if (!data.features || !Array.isArray(data.features)) {
+                if (allFeatures.length > 0) {
+                  resolve(allFeatures);
+                } else {
+                  reject(new Error('Invalid API response'));
+                }
+                return;
+              }
+
+              allFeatures.push(...data.features);
+
+              // Check if there are more pages
+              const returned = data.numberReturned || data.features.length;
+              if (returned >= EPROSTOR_LIMIT) {
+                startIndex += EPROSTOR_LIMIT;
+                fetchPage();
+              } else {
+                resolve(allFeatures);
+              }
+            } catch (err) {
+              reject(err);
+            }
+          },
+          onerror: function (err) {
+            reject(err);
+          }
+        });
+      }
+
+      fetchPage();
+    });
   }
 
   function init() {
@@ -683,149 +756,123 @@
           b.bottom -= buffer;
           b.top   += buffer;
 
+          // Convert bounds from EPSG:3857 to EPSG:3794
           const bl = proj4('EPSG:3857', 'EPSG:3794', [b.left,  b.bottom]);
           const tr = proj4('EPSG:3857', 'EPSG:3794', [b.right, b.top]);
 
-          const urlGml = 'https://storitve.eprostor.gov.si/ows-ins-wfs/ows?' +
-            'service=WFS&version=2.0.0&request=GetFeature&typeNames=ad:Address&outputFormat=GML32&' +
-            `bbox=${bl[0]},${bl[1]},${tr[0]},${tr[1]},urn:ogc:def:crs:EPSG::3794`;
+          const minE = Math.floor(bl[0]);
+          const minN = Math.floor(bl[1]);
+          const maxE = Math.ceil(tr[0]);
+          const maxN = Math.ceil(tr[1]);
 
           const selectionHNMap = getVisibleHNsByStreet();
 
-          GM_xmlhttpRequest({
-            method: 'GET',
-            url: urlGml,
-            onload: function (response) {
-              try {
-                const parser = new DOMParser();
-                const xmlDoc = parser.parseFromString(response.responseText, 'text/xml');
-                const addresses = xmlDoc.getElementsByTagNameNS(
-                  'http://inspire.ec.europa.eu/schemas/ad/4.0',
-                  'Address'
-                );
+          fetchAddresses(minE, minN, maxE, maxN)
+            .then(apiFeatures => {
+              const features = [];
 
-                const features = [];
+              for (const item of apiFeatures) {
+                const props = item.properties;
+                if (!props) continue;
 
-                for (let i = 0; i < addresses.length; i++) {
-                  const address = addresses[i];
+                // Skip addresses without coordinates
+                const e = props.E;
+                const n = props.N;
+                if (e == null || n == null) continue;
 
-                  const pos = address.getElementsByTagNameNS('http://www.opengis.net/gml/3.2', 'pos')[0];
-                  if (!pos) continue;
-                  const coords = pos.textContent.trim().split(' ');
-                  const [x3794, y3794] = coords.map(parseFloat);
-                  const [wx, wy] = proj4('EPSG:3794', 'EPSG:3857', [x3794, y3794]);
+                // Convert from EPSG:3794 to EPSG:3857
+                const [wx, wy] = proj4('EPSG:3794', 'EPSG:3857', [e, n]);
 
-                  const designators = address.getElementsByTagNameNS(
-                    'http://inspire.ec.europa.eu/schemas/ad/4.0',
-                    'designator'
-                  );
-                  let hn = null;
-                  for (let j = 0; j < designators.length; j++) {
-                    const val = designators[j].textContent.trim();
-                    if (val) { hn = val.toLowerCase().trim(); break; }
-                  }
-                  if (!hn) continue;
+                // Build house number from components
+                const hn = buildHouseNumber(props.HS_STEVILKA, props.HS_DODATEK);
+                if (!hn) continue;
 
-                  const components = address.getElementsByTagNameNS(
-                    'http://inspire.ec.europa.eu/schemas/ad/4.0',
-                    'component'
-                  );
-                  let streetName = null;
-                  for (let k = 0; k < components.length; k++) {
-                    const href  = components[k].getAttributeNS('http://www.w3.org/1999/xlink', 'href');
-                    const title = components[k].getAttributeNS('http://www.w3.org/1999/xlink', 'title');
-                    if (href && href.includes('ThoroughfareName')) { streetName = title; break; }
-                  }
-                  if (!streetName) continue;
+                // Get street name
+                const streetName = props.ULICA_NAZIV;
+                if (!streetName) continue;
 
-                  const streetId = normalizeStreetName(streetName);
-                  if (!streets[streetName]) {
-                    streets[streetName]   = streetId;
-                    streetNames[streetId] = streetName;
-                  }
+                const streetId = normalizeStreetName(streetName);
+                if (!streets[streetName]) {
+                  streets[streetName]   = streetId;
+                  streetNames[streetId] = streetName;
+                }
 
-                  const entry = selectionHNMap.get(streetId);
-                  const processed = entry?.set.has(hn) === true;
+                const entry = selectionHNMap.get(streetId);
+                const processed = entry?.set.has(hn) === true;
 
-                  let conflict = false;
-                  if (!processed && entry?.items?.length) {
-                    const epX = wx, epY = wy;
-                    for (const it of entry.items) {
-                      if (!it || it.x == null || it.y == null) continue;
-                      if (it.num !== hn) {
-                        const dx = epX - it.x, dy = epY - it.y;
-                        if (dx*dx + dy*dy <= MAX_HN_CONFLICT_DISTANCE * MAX_HN_CONFLICT_DISTANCE) {
-                          conflict = true;
-                          break;
-                        }
+                let conflict = false;
+                if (!processed && entry?.items?.length) {
+                  const epX = wx, epY = wy;
+                  for (const it of entry.items) {
+                    if (!it || it.x == null || it.y == null) continue;
+                    if (it.num !== hn) {
+                      const dx = epX - it.x, dy = epY - it.y;
+                      if (dx*dx + dy*dy <= MAX_HN_CONFLICT_DISTANCE * MAX_HN_CONFLICT_DISTANCE) {
+                        conflict = true;
+                        break;
                       }
                     }
                   }
-
-                  features.push(
-                    new OpenLayers.Feature.Vector(new OpenLayers.Geometry.Point(wx, wy), {
-                      number: hn,
-                      street: streetId,
-                      processed,
-                      conflict
-                    })
-                  );
                 }
 
-                const allStreetIds = new Set();
-                selection.segments.forEach(seg => {
-                  (seg.attributes.streetIDs || []).forEach(id => allStreetIds.add(id));
-                  if (seg.attributes.primaryStreetID) allStreetIds.add(seg.attributes.primaryStreetID);
-                });
-                const selectedNames = W.model.streets.getByIds([...allStreetIds])
-                  .map(s => s?.attributes?.name)
-                  .filter(Boolean);
-
-                let best = null, bestCount = -1;
-                selectedNames.forEach(name => {
-                  const sid = streets[name];
-                  if (!sid) return;
-                  const count = features.reduce((n,f)=> n + (f.attributes?.street === sid ? 1 : 0), 0);
-                  if (count > bestCount) { best = sid; bestCount = count; }
-                });
-                currentStreetId = best || null;
-
-                if (!features.length) {
-                  loading.style.display = 'none';
-                  statusDiv.textContent = 'No address points in view.';
-                  resolve();
-                  return;
-                }
-
-                lastFeatures = features;
-
-                if (currentStreetId && streetNames[currentStreetId]) {
-                  streetNameSpan.textContent = streetNames[currentStreetId];
-                  currentStreetDiv.style.display = 'block';
-                } else {
-                  currentStreetDiv.style.display = 'none';
-                }
-
-                layer.removeAllFeatures();
-                applyFeatureFilter();
-
-                loading.style.display = 'none';
-                statusDiv.innerHTML = `Loaded ${lastFeatures.length} address points.<br/><b>Click numbers on map to add them!</b><br/>Green = selected • Orange = other • Red = possible wrong HN`;
-                resolve();
-              } catch (err) {
-                fail(err);
+                features.push(
+                  new OpenLayers.Feature.Vector(new OpenLayers.Geometry.Point(wx, wy), {
+                    number: hn,
+                    street: streetId,
+                    processed,
+                    conflict
+                  })
+                );
               }
-            },
-            onerror: fail
-          });
 
-          function fail(err) {
-            console.error('[Quick HN Importer] WFS error:', err);
-            loading.style.display = 'none';
-            statusDiv.textContent = 'Error fetching WFS data. See console.';
-            toast('Error fetching WFS data.', 'error');
-            resolve();
-          }
+              const allStreetIds = new Set();
+              selection.segments.forEach(seg => {
+                (seg.attributes.streetIDs || []).forEach(id => allStreetIds.add(id));
+                if (seg.attributes.primaryStreetID) allStreetIds.add(seg.attributes.primaryStreetID);
+              });
+              const selectedNames = W.model.streets.getByIds([...allStreetIds])
+                .map(s => s?.attributes?.name)
+                .filter(Boolean);
+
+              let best = null, bestCount = -1;
+              selectedNames.forEach(name => {
+                const sid = streets[name];
+                if (!sid) return;
+                const count = features.reduce((n,f)=> n + (f.attributes?.street === sid ? 1 : 0), 0);
+                if (count > bestCount) { best = sid; bestCount = count; }
+              });
+              currentStreetId = best || null;
+
+              if (!features.length) {
+                loading.style.display = 'none';
+                statusDiv.textContent = 'No address points in view.';
+                resolve();
+                return;
+              }
+
+              lastFeatures = features;
+
+              if (currentStreetId && streetNames[currentStreetId]) {
+                streetNameSpan.textContent = streetNames[currentStreetId];
+                currentStreetDiv.style.display = 'block';
+              } else {
+                currentStreetDiv.style.display = 'none';
+              }
+
+              layer.removeAllFeatures();
+              applyFeatureFilter();
+
+              loading.style.display = 'none';
+              statusDiv.innerHTML = `Loaded ${lastFeatures.length} address points.<br/><b>Click numbers on map to add them!</b><br/>Green = selected • Orange = other • Red = possible wrong HN`;
+              resolve();
+            })
+            .catch(err => {
+              console.error('[Quick HN Importer] API error:', err);
+              loading.style.display = 'none';
+              statusDiv.textContent = 'Error fetching address data. See console.';
+              toast('Error fetching address data.', 'error');
+              resolve();
+            });
         });
       }
 
