@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WME Quick HN Importer - Slovenia
 // @namespace    https://github.com/zigapovhe/wme-sl-hn-import
-// @version      2.0.0
+// @version      2.1.0
 // @description  Quickly add Slovenian house numbers with clickable overlays
 // @author       ThatByte
 // @downloadURL  https://raw.githubusercontent.com/zigapovhe/wme-sl-hn-import/main/wme-sl-hn-import.user.js
@@ -17,6 +17,7 @@
 // @connect      raw.githubusercontent.com
 // @require      https://cdnjs.cloudflare.com/ajax/libs/proj4js/2.9.0/proj4.js
 // @grant        GM_xmlhttpRequest
+// @grant        GM_setClipboard
 // @license      MIT
 // @noframes
 // ==/UserScript==
@@ -40,6 +41,14 @@
   // EProstor API configuration
   const EPROSTOR_API = 'https://ipi.eprostor.gov.si/wfs-si-gurs-rn/ogc/features/collections/SI.GURS.RN:REGISTER_NASLOVOV/items';
   const EPROSTOR_LIMIT = 1000;
+
+  // Common Slovenian street name abbreviations
+  const ABBREVIATIONS = {
+    'c.': 'cesta',
+    'ul.': 'ulica',
+    'nab.': 'nabrežje',
+    'trg.': 'trg'
+  };
 
   const LS = {
     getBuffer()       { return Number(localStorage.getItem('qhnsl-buffer') ?? '500'); },
@@ -72,6 +81,77 @@
 
   function normalizeStreetName(name) {
     return String(name).toLowerCase().replace(/\s+/g, '_');
+  }
+
+  // Escape HTML special characters for safe attribute insertion
+  function escapeHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }
+
+  // Expand abbreviations and normalize for comparison
+  function normalizeForComparison(name) {
+    let normalized = String(name).toLowerCase().trim();
+
+    for (const [abbrev, full] of Object.entries(ABBREVIATIONS)) {
+      const regex = new RegExp(abbrev.replace('.', '\\.') + '\\s*$', 'i');
+      normalized = normalized.replace(regex, full);
+    }
+
+    // Remove extra whitespace
+    normalized = normalized.replace(/\s+/g, ' ');
+
+    return normalized;
+  }
+
+  function removeDiacritics(str) {
+    return str.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  }
+
+  // Calculate similarity between two strings (0-1)
+  function calculateSimilarity(str1, str2) {
+    const s1 = normalizeForComparison(str1);
+    const s2 = normalizeForComparison(str2);
+
+    // Exact match after normalization
+    if (s1 === s2) return 1.0;
+
+    // Match without diacritics
+    if (removeDiacritics(s1) === removeDiacritics(s2)) return 0.95;
+
+    // Levenshtein distance based similarity
+    const distance = levenshteinDistance(s1, s2);
+    const maxLen = Math.max(s1.length, s2.length);
+    const similarity = 1 - (distance / maxLen);
+
+    return similarity;
+  }
+
+  // Levenshtein distance implementation
+  function levenshteinDistance(str1, str2) {
+    const m = str1.length;
+    const n = str2.length;
+    const dp = Array(m + 1).fill(null).map(() => Array(n + 1).fill(0));
+
+    for (let i = 0; i <= m; i++) dp[i][0] = i;
+    for (let j = 0; j <= n; j++) dp[0][j] = j;
+
+    for (let i = 1; i <= m; i++) {
+      for (let j = 1; j <= n; j++) {
+        const cost = str1[i - 1] === str2[j - 1] ? 0 : 1;
+        dp[i][j] = Math.min(
+          dp[i - 1][j] + 1,
+          dp[i][j - 1] + 1,
+          dp[i - 1][j - 1] + cost
+        );
+      }
+    }
+
+    return dp[m][n];
   }
 
   function getSegmentGeometry(seg) {
@@ -155,6 +235,77 @@
     });
   }
 
+  // Copy text to clipboard
+  function copyToClipboard(text) {
+    if (typeof GM_setClipboard === 'function') {
+      GM_setClipboard(text, 'text');
+      toast(`Copied "${text}" to clipboard`, 'success');
+    } else {
+      navigator.clipboard.writeText(text).then(() => {
+        toast(`Copied "${text}" to clipboard`, 'success');
+      }).catch(() => {
+        toast('Failed to copy to clipboard', 'error');
+      });
+    }
+  }
+
+  // Update selected segment's street name via WME SDK
+  function updateSegmentStreetName(newStreetName, onSuccess) {
+    const selection = W.selectionManager.getSegmentSelection();
+    if (!selection.segments || selection.segments.length === 0) {
+      toast('No segment selected', 'warning');
+      return;
+    }
+
+    const segment = selection.segments[0];
+    const segmentId = segment.attributes.id;
+
+    // Get current city from the segment
+    const currentStreetId = segment.attributes.primaryStreetID;
+    const currentStreet = currentStreetId ? W.model.streets.getObjectById(currentStreetId) : null;
+    const cityId = currentStreet?.attributes?.cityID;
+
+    if (!cityId) {
+      toast('Segment has no city assigned', 'warning');
+      return;
+    }
+
+    try {
+      // First, try to get existing street with this name in this city
+      let street = wmeSDK.DataModel.Streets.getStreet({
+        cityId: cityId,
+        streetName: newStreetName
+      });
+
+      // If not found, create the street
+      if (!street) {
+        console.log('[SL-HN] Street not found, creating new street:', newStreetName);
+        street = wmeSDK.DataModel.Streets.addStreet({
+          streetName: newStreetName,
+          cityId: cityId
+        });
+      }
+
+      console.log('[SL-HN] Got street:', street);
+
+      // Now update the segment with the new street ID
+      wmeSDK.DataModel.Segments.updateAddress({
+        segmentId: segmentId,
+        primaryStreetId: street.id
+      });
+
+      console.log('[SL-HN] Updated segment', segmentId, 'to street ID:', street.id);
+      toast(`Updated street to "${newStreetName}"`, 'success');
+
+      if (typeof onSuccess === 'function') {
+        onSuccess();
+      }
+    } catch (err) {
+      console.error('[SL-HN] Error updating street name:', err);
+      toast('Error updating street name. See console.', 'error');
+    }
+  }
+
   function init() {
     let currentStreetId = null;
     let streetNames = {};
@@ -164,11 +315,13 @@
     let userWantsLayerVisible = false;
     let streetNameSpan = null;
     let currentStreetDiv = null;
+    let streetAnalysisDiv = null;
 
     let chkMissing = null;
     let chkSelectedOnly = null;
 
     let applyFeatureFilter = () => {};
+    let analyzeStreetMatches = () => {};
 
     const layer = new OpenLayers.Layer.Vector(LAYER_NAME, {
       uniqueName: 'quick-hn-sl-importer',
@@ -239,6 +392,181 @@
     W.map.events.register('moveend', null, updateLayerVisibility);
     W.selectionManager.events.register('selectionchanged', null, onSelectionChanged);
 
+    // Get current WME street name from selection
+    function getWmeStreetName() {
+      const selection = W.selectionManager.getSegmentSelection();
+      if (!selection.segments || selection.segments.length === 0) return null;
+
+      const seg = selection.segments[0];
+      const primaryStreetId = seg.attributes.primaryStreetID;
+      if (!primaryStreetId) return null;
+
+      const street = W.model.streets.getObjectById(primaryStreetId);
+      return street?.attributes?.name || null;
+    }
+
+    // Analyze street name matches and update UI
+    analyzeStreetMatches = function() {
+      if (!streetAnalysisDiv) return;
+      if (!lastFeatures.length) {
+        streetAnalysisDiv.style.display = 'none';
+        return;
+      }
+
+      const wmeStreetName = getWmeStreetName();
+
+      // Count addresses per official street name
+      const streetCounts = {};
+      const streetMissing = {};
+
+      lastFeatures.forEach(f => {
+        const name = streetNames[f.attributes.street];
+        if (!name) return;
+        streetCounts[name] = (streetCounts[name] || 0) + 1;
+        if (!f.attributes.processed && !f.attributes.conflict) {
+          streetMissing[name] = (streetMissing[name] || 0) + 1;
+        }
+      });
+
+      // Sort by count descending
+      const sorted = Object.entries(streetCounts)
+        .sort((a, b) => b[1] - a[1]);
+
+      if (sorted.length === 0) {
+        streetAnalysisDiv.style.display = 'none';
+        return;
+      }
+
+      // Check how many match current WME street
+      const matchCount = wmeStreetName ? (streetCounts[wmeStreetName] || 0) : 0;
+      const hasMismatch = wmeStreetName && matchCount === 0 && sorted.length > 0;
+
+      // Find fuzzy match if there's a mismatch
+      let suggestedMatch = null;
+      let suggestionSimilarity = 0;
+
+      if (hasMismatch && wmeStreetName) {
+        for (const [name] of sorted) {
+          const similarity = calculateSimilarity(wmeStreetName, name);
+          if (similarity > 0.7 && similarity > suggestionSimilarity) {
+            suggestedMatch = name;
+            suggestionSimilarity = similarity;
+          }
+        }
+      }
+
+      // Build HTML
+      let html = '';
+
+      if (hasMismatch) {
+        html += `<div style="background:#fff3cd;border:1px solid #ffc107;border-radius:4px;padding:8px;margin-bottom:8px;">`;
+        html += `<b style="color:#856404;">⚠️ No matching addresses found!</b><br/>`;
+        html += `<span style="font-size:11px;color:#856404;">WME street name doesn't match any official names</span>`;
+        html += `</div>`;
+
+        if (suggestedMatch) {
+          const escapedSuggested = escapeHtml(suggestedMatch);
+          html += `<div style="background:#d4edda;border:1px solid #28a745;border-radius:4px;padding:8px;margin-bottom:8px;">`;
+          html += `<b style="color:#155724;">💡 Possible match found:</b><br/>`;
+          html += `<div style="margin:4px 0;font-size:12px;">`;
+          html += `<span style="color:#666;">WME:</span> <span style="color:#dc3545;text-decoration:line-through;">${escapeHtml(wmeStreetName)}</span><br/>`;
+          html += `<span style="color:#666;">Official:</span> <b style="color:#155724;">${escapedSuggested}</b>`;
+          html += `</div>`;
+          html += `<div style="display:flex;gap:6px;margin-top:6px;">`;
+          html += `<button class="wz-button update-street-btn" data-street="${escapedSuggested}" style="font-size:11px;padding:2px 8px;">✓ Use this name</button>`;
+          html += `<button class="copy-street-btn" data-street="${escapedSuggested}" style="font-size:11px;padding:2px 8px;background:#f8f8f8;border:1px solid #ccc;border-radius:3px;cursor:pointer;">📋 Copy</button>`;
+          html += `</div>`;
+          html += `</div>`;
+        }
+      }
+
+      html += `<div style="font-size:12px;margin-bottom:4px;"><b>Official streets in area:</b></div>`;
+      html += `<div style="max-height:150px;overflow-y:auto;border:1px solid #ddd;border-radius:4px;background:#fafafa;">`;
+
+      sorted.forEach(([name, count], index) => {
+        const missing = streetMissing[name] || 0;
+        const isMatch = name === wmeStreetName;
+        const isSuggestion = name === suggestedMatch;
+        const escapedName = escapeHtml(name);
+
+        let rowStyle = 'padding:4px 8px;font-size:11px;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center;';
+        if (isMatch) rowStyle += 'background:#d4edda;';
+        else if (isSuggestion) rowStyle += 'background:#fff3cd;';
+        else if (index % 2 === 0) rowStyle += 'background:#f8f8f8;';
+
+        html += `<div style="${rowStyle}">`;
+        html += `<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapedName}">`;
+        if (isMatch) html += '✓ ';
+        if (isSuggestion) html += '→ ';
+        html += `${escapedName}</span>`;
+        html += `<span style="margin-left:8px;white-space:nowrap;display:flex;align-items:center;gap:4px;">`;
+        html += `<span style="color:#666;">${count}</span>`;
+        if (missing > 0) html += `<span style="color:#dc3545;">(${missing})</span>`;
+        // Always show the update button - if already matched, show as disabled-looking but still clickable
+        const btnStyle = isMatch
+          ? 'padding:1px 4px;font-size:10px;cursor:default;border:1px solid #ccc;border-radius:2px;background:#e9e9e9;color:#999;'
+          : 'padding:1px 4px;font-size:10px;cursor:pointer;border:1px solid #28a745;border-radius:2px;background:#d4edda;color:#155724;';
+        html += `<button class="update-street-btn" data-street="${escapedName}" style="${btnStyle}" title="${isMatch ? 'Already set' : 'Use this name'}">${isMatch ? '✓' : '→'}</button>`;
+        html += `<button class="copy-street-btn" data-street="${escapedName}" style="padding:1px 4px;font-size:10px;cursor:pointer;border:1px solid #ccc;border-radius:2px;background:#fff;" title="Copy to clipboard">📋</button>`;
+        html += `</span>`;
+        html += `</div>`;
+      });
+
+      html += `</div>`;
+      html += `<div style="font-size:10px;color:#888;margin-top:4px;">→ = apply name • 📋 = copy • <span style="color:#dc3545;">(red)</span> = missing</div>`;
+
+      streetAnalysisDiv.innerHTML = html;
+      streetAnalysisDiv.style.display = 'block';
+
+      // Add click handlers for copy buttons
+      streetAnalysisDiv.querySelectorAll('.copy-street-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const streetName = btn.getAttribute('data-street');
+          copyToClipboard(streetName);
+        });
+      });
+
+      // Add click handlers for update buttons
+      streetAnalysisDiv.querySelectorAll('.update-street-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const streetName = btn.getAttribute('data-street');
+
+          // Check if this street is already set on the current segment
+          const currentWmeStreet = getWmeStreetName();
+          if (currentWmeStreet === streetName) {
+            toast('Street name already set', 'info');
+            return;
+          }
+
+          updateSegmentStreetName(streetName, () => {
+            // After successful update, refresh the current street state
+            // Find the street ID for the new street name
+            const newStreetId = streets[streetName];
+            if (newStreetId) {
+              currentStreetId = newStreetId;
+
+              // Update the "Current street" display
+              if (streetNameSpan && currentStreetDiv) {
+                streetNameSpan.textContent = streetName;
+                currentStreetDiv.style.display = 'block';
+              }
+            }
+
+            // Re-analyze and redraw with updated state
+            setTimeout(() => {
+              analyzeStreetMatches();
+              applyFeatureFilter();
+              layer.redraw();
+            }, 100);
+          });
+        });
+      });
+    };
+
     function onSelectionChanged() {
       if (!lastFeatures.length) return;
 
@@ -258,15 +586,14 @@
       });
 
       if (selectedStreetIds.size === 0) {
-        if (currentStreetId !== null) {
-          currentStreetId = null;
-          if (streetNameSpan && currentStreetDiv) {
-            streetNameSpan.textContent = '—';
-            currentStreetDiv.style.display = 'none';
-          }
-          layer.redraw();
-          applyFeatureFilter();
+        currentStreetId = null;
+        if (streetNameSpan && currentStreetDiv) {
+          streetNameSpan.textContent = '—';
+          currentStreetDiv.style.display = 'none';
         }
+        layer.redraw();
+        applyFeatureFilter();
+        analyzeStreetMatches();
         return;
       }
 
@@ -291,20 +618,19 @@
       });
 
       if (!newStreetId) {
-        if (currentStreetId !== null) {
-          currentStreetId = null;
-          if (streetNameSpan && currentStreetDiv) {
-            streetNameSpan.textContent = '—';
-            currentStreetDiv.style.display = 'none';
-          }
-          layer.redraw();
-          applyFeatureFilter();
+        currentStreetId = null;
+        if (streetNameSpan && currentStreetDiv) {
+          streetNameSpan.textContent = '—';
+          currentStreetDiv.style.display = 'none';
         }
+        layer.redraw();
+        applyFeatureFilter();
+        analyzeStreetMatches();
         return;
       }
 
-      if (newStreetId === currentStreetId) return;
-
+      // Always update state and refresh UI, even if street is the same
+      // (because we might be on a different segment with the same street)
       currentStreetId = newStreetId;
 
       if (streetNameSpan && currentStreetDiv && streetNames[currentStreetId]) {
@@ -314,6 +640,7 @@
 
       layer.redraw();
       applyFeatureFilter();
+      analyzeStreetMatches();
     }
 
 
@@ -519,8 +846,9 @@
             <button id="hn-clear" class="wz-button wz-button--secondary">Clear</button>
           </div>
           <div id="hn-current-street" style="margin:8px 0;padding:8px;background:#f0f0f0;border-radius:4px;font-size:13px;display:none;">
-            <b>Current street:</b> <span id="hn-street-name" style="color:#2a7;font-weight:bold;">—</span>
+            <b>WME selected street:</b> <span id="hn-street-name" style="color:#2a7;font-weight:bold;">—</span>
           </div>
+          <div id="hn-street-analysis" style="margin:8px 0;display:none;"></div>
           <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
             <wz-checkbox id="hn-toggle">Show layer</wz-checkbox>
             <wz-checkbox id="qhnsl-missing">Show only missing</wz-checkbox>
@@ -545,6 +873,7 @@
 
       currentStreetDiv = tabPane.querySelector('#hn-current-street');
       streetNameSpan = tabPane.querySelector('#hn-street-name');
+      streetAnalysisDiv = tabPane.querySelector('#hn-street-analysis');
 
       const isChecked  = (el) => el?.hasAttribute('checked');
       const setChecked = (el, v) => v ? el.setAttribute('checked', '') : el.removeAttribute('checked');
@@ -599,6 +928,7 @@
         streetNames = {};
         currentStreetId = null;
         lastFeatures = [];
+        streetAnalysisDiv.style.display = 'none';
 
         await updateLayer(statusDiv).catch(() => {});
         userWantsLayerVisible = true;
@@ -622,6 +952,7 @@
         currentStreetId = null;
         lastFeatures = [];
         currentStreetDiv.style.display = 'none';
+        streetAnalysisDiv.style.display = 'none';
         statusDiv.innerHTML = `<b>Instructions</b><br/>
           1) Select a segment • 2) Click "Load selected street" • 3) <b>Click house numbers on map to add them</b><br/>
           Green = selected street • Orange = other streets • Red = possible wrong HN • Faded = already in WME`;
@@ -712,6 +1043,18 @@
             }
           }
         });
+
+        // Listen for segment edits (like street name changes) to refresh UI
+        wmeSDK.Events.on({
+          eventName: 'wme-after-edit',
+          eventHandler: () => {
+            if (lastFeatures.length > 0) {
+              // Refresh the street analysis panel to reflect any street name changes
+              analyzeStreetMatches();
+              layer.redraw();
+            }
+          }
+        });
       }
 
       setupHouseNumberEventListeners();
@@ -787,8 +1130,8 @@
                 const hn = buildHouseNumber(props.HS_STEVILKA, props.HS_DODATEK);
                 if (!hn) continue;
 
-                // Get street name
-                const streetName = props.ULICA_NAZIV;
+                // Get street name, or settlement name for villages without streets
+                const streetName = props.ULICA_NAZIV || props.NASELJE_NAZIV;
                 if (!streetName) continue;
 
                 const streetId = normalizeStreetName(streetName);
@@ -861,6 +1204,7 @@
 
               layer.removeAllFeatures();
               applyFeatureFilter();
+              analyzeStreetMatches();
 
               loading.style.display = 'none';
               statusDiv.innerHTML = `Loaded ${lastFeatures.length} address points.<br/><b>Click numbers on map to add them!</b><br/>Green = selected • Orange = other • Red = possible wrong HN`;
