@@ -67,7 +67,6 @@ When you load addresses, the script analyzes official street names from EProstor
 - **Missing count**: Red numbers show how many addresses are missing in WME for each street
 
 ---
----
 
 ## ⚠️ Notes & Gotchas
 
