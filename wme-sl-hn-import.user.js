@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WME Quick HN Importer - Slovenia
 // @namespace    https://github.com/zigapovhe/wme-sl-hn-import
-// @version      2.1.0
+// @version      2.1.1
 // @description  Quickly add Slovenian house numbers with clickable overlays
 // @author       ThatByte
 // @downloadURL  https://raw.githubusercontent.com/zigapovhe/wme-sl-hn-import/main/wme-sl-hn-import.user.js
@@ -417,20 +417,16 @@
 
       // Count addresses per official street name
       const streetCounts = {};
-      const streetMissing = {};
-
       lastFeatures.forEach(f => {
         const name = streetNames[f.attributes.street];
         if (!name) return;
         streetCounts[name] = (streetCounts[name] || 0) + 1;
-        if (!f.attributes.processed && !f.attributes.conflict) {
-          streetMissing[name] = (streetMissing[name] || 0) + 1;
-        }
       });
 
       // Sort by count descending
+      // Always order by number of loaded HNs (desc), then alphabetically for stability
       const sorted = Object.entries(streetCounts)
-        .sort((a, b) => b[1] - a[1]);
+        .sort((a, b) => (b[1] - a[1]) || a[0].localeCompare(b[0]));
 
       if (sorted.length === 0) {
         streetAnalysisDiv.style.display = 'none';
@@ -473,7 +469,7 @@
           html += `<span style="color:#666;">Official:</span> <b style="color:#155724;">${escapedSuggested}</b>`;
           html += `</div>`;
           html += `<div style="display:flex;gap:6px;margin-top:6px;">`;
-          html += `<button class="wz-button update-street-btn" data-street="${escapedSuggested}" style="font-size:11px;padding:2px 8px;">✓ Use this name</button>`;
+          html += `<button class="wz-button update-street-btn" data-street="${escapedSuggested}" style="font-size:11px;padding:2px 8px;">✓ Use official name</button>`;
           html += `<button class="copy-street-btn" data-street="${escapedSuggested}" style="font-size:11px;padding:2px 8px;background:#f8f8f8;border:1px solid #ccc;border-radius:3px;cursor:pointer;">📋 Copy</button>`;
           html += `</div>`;
           html += `</div>`;
@@ -483,8 +479,7 @@
       html += `<div style="font-size:12px;margin-bottom:4px;"><b>Official streets in area:</b></div>`;
       html += `<div style="max-height:150px;overflow-y:auto;border:1px solid #ddd;border-radius:4px;background:#fafafa;">`;
 
-      sorted.forEach(([name, count], index) => {
-        const missing = streetMissing[name] || 0;
+      sorted.forEach(([name, _count], index) => {
         const isMatch = name === wmeStreetName;
         const isSuggestion = name === suggestedMatch;
         const escapedName = escapeHtml(name);
@@ -500,8 +495,6 @@
         if (isSuggestion) html += '→ ';
         html += `${escapedName}</span>`;
         html += `<span style="margin-left:8px;white-space:nowrap;display:flex;align-items:center;gap:4px;">`;
-        html += `<span style="color:#666;">${count}</span>`;
-        if (missing > 0) html += `<span style="color:#dc3545;">(${missing})</span>`;
         // Always show the update button - if already matched, show as disabled-looking but still clickable
         const btnStyle = isMatch
           ? 'padding:1px 4px;font-size:10px;cursor:default;border:1px solid #ccc;border-radius:2px;background:#e9e9e9;color:#999;'
@@ -513,7 +506,7 @@
       });
 
       html += `</div>`;
-      html += `<div style="font-size:10px;color:#888;margin-top:4px;">→ = apply name • 📋 = copy • <span style="color:#dc3545;">(red)</span> = missing</div>`;
+      html += `<div style="font-size:10px;color:#888;margin-top:4px;">→ = apply name • 📋 = copy</div>`;
 
       streetAnalysisDiv.innerHTML = html;
       streetAnalysisDiv.style.display = 'block';
