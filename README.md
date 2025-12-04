@@ -2,7 +2,7 @@
 
 ![SL-HN icon](./icon64.png)
 
-![WME Quick HN Importer preview](./screenshot1.png)
+![WME Quick HN Importer preview](./screenshot.png)
 
 A **Tampermonkey userscript** for Waze Map Editor (WME) that displays official Slovenian house numbers from **EProstor** directly on the WME map.  
 This helps editors quickly add and verify house numbers without manually opening external GIS portals.
@@ -64,8 +64,6 @@ When you load addresses, the script analyzes official street names from EProstor
 ### Features
 - **Fuzzy matching**: Detects typos, missing diacritics (e.g., "Šmartinska" vs "Smartinska"), and common abbreviations (c. → cesta, ul. → ulica)
 - **Copy to clipboard**: Click 📋 to copy any official street name
-- **Missing count**: Red numbers show how many addresses are missing in WME for each street
-
 ---
 
 ## ⚠️ Notes & Gotchas
