@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WME Quick HN Importer - Slovenia
 // @namespace    https://github.com/zigapovhe/wme-sl-hn-import
-// @version      2.1.1
+// @version      2.1.2
 // @description  Quickly add Slovenian house numbers with clickable overlays
 // @author       ThatByte
 // @downloadURL  https://raw.githubusercontent.com/zigapovhe/wme-sl-hn-import/main/wme-sl-hn-import.user.js
@@ -98,8 +98,9 @@
     let normalized = String(name).toLowerCase().trim();
 
     for (const [abbrev, full] of Object.entries(ABBREVIATIONS)) {
-      const regex = new RegExp(abbrev.replace('.', '\\.') + '\\s*$', 'i');
-      normalized = normalized.replace(regex, full);
+      const escapedAbbrev = abbrev.replace('.', '\\.');
+      const regex = new RegExp('(^|\\s)' + escapedAbbrev + '(?=\\s|$)', 'gi');
+      normalized = normalized.replace(regex, '$1' + full);
     }
 
     // Remove extra whitespace
@@ -173,6 +174,21 @@
       hn += String(dodatek).trim();
     }
     return hn.toLowerCase();
+  }
+
+  // Check if a house number has a nearby conflict (different HN within threshold distance)
+  function hasConflict(hn, wx, wy, entry) {
+    if (!entry?.items?.length) return false;
+    for (const it of entry.items) {
+      if (!it || it.x == null || it.y == null) continue;
+      if (it.num !== hn) {
+        const dx = wx - it.x, dy = wy - it.y;
+        if (dx * dx + dy * dy <= MAX_HN_CONFLICT_DISTANCE * MAX_HN_CONFLICT_DISTANCE) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   // Build CQL filter for coordinate bounds (excludes apartments)
@@ -740,7 +756,7 @@
 
       if (matchName) {
         const matchingStreetIds = W.model.streets.getObjectArray()
-          .filter(street => street.attributes.name.toLowerCase() === streetName.toLowerCase())
+          .filter(street => street.attributes?.name?.toLowerCase() === streetName.toLowerCase())
           .map(street => street.attributes.id);
 
         if (matchingStreetIds.length === 0) {
@@ -985,20 +1001,7 @@
 
           const entry = selectionHNMap.get(streetId);
           const processed = entry?.set.has(hn) === true;
-
-          let conflict = false;
-          if (!processed && entry?.items?.length) {
-            for (const it of entry.items) {
-              if (!it || it.x == null || it.y == null) continue;
-              if (it.num !== hn) {
-                const dx = wx - it.x, dy = wy - it.y;
-                if (dx*dx + dy*dy <= MAX_HN_CONFLICT_DISTANCE * MAX_HN_CONFLICT_DISTANCE) {
-                  conflict = true;
-                  break;
-                }
-              }
-            }
-          }
+          const conflict = !processed && hasConflict(hn, wx, wy, entry);
 
           feature.attributes.processed = processed;
           feature.attributes.conflict = conflict;
@@ -1135,21 +1138,7 @@
 
                 const entry = selectionHNMap.get(streetId);
                 const processed = entry?.set.has(hn) === true;
-
-                let conflict = false;
-                if (!processed && entry?.items?.length) {
-                  const epX = wx, epY = wy;
-                  for (const it of entry.items) {
-                    if (!it || it.x == null || it.y == null) continue;
-                    if (it.num !== hn) {
-                      const dx = epX - it.x, dy = epY - it.y;
-                      if (dx*dx + dy*dy <= MAX_HN_CONFLICT_DISTANCE * MAX_HN_CONFLICT_DISTANCE) {
-                        conflict = true;
-                        break;
-                      }
-                    }
-                  }
-                }
+                const conflict = !processed && hasConflict(hn, wx, wy, entry);
 
                 features.push(
                   new OpenLayers.Feature.Vector(new OpenLayers.Geometry.Point(wx, wy), {
