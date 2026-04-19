@@ -718,6 +718,10 @@
           segmentId: nearestSegment.id
         });
 
+        feature.processed = true;
+        feature.conflict = false;
+        applyFeatureFilter();
+
         console.log('[SL-HN] Added house number', houseNumber);
         toast(`Added house number ${houseNumber}`, 'success');
       } catch (err) {
