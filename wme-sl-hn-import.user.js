@@ -164,6 +164,11 @@
   function getHNGeometry(hn) {
     if (!hn) return null;
     if (typeof hn.getOLGeometry === 'function') return hn.getOLGeometry();
+    // SDK HN objects have geometry as GeoJSON Point {type, coordinates: [lon, lat]}
+    // Return {x, y} so existing callers work regardless of source.
+    if (hn.geometry?.type === 'Point' && Array.isArray(hn.geometry.coordinates)) {
+      return { x: hn.geometry.coordinates[0], y: hn.geometry.coordinates[1] };
+    }
     return hn.geometry || hn.attributes?.geometry || null;
   }
 
@@ -1264,7 +1269,8 @@
           }
           if (x == null || y == null || !bounds.containsLonLat({ lon: x, lat: y })) return;
 
-          // NOTE: hn.number is from SDK (Phase 5 will fix coordinate system for geometry)
+          // Note: bounds check will reject all HNs until Phase 5 unifies the coordinate system.
+          // Faded "already in WME" coloring is a known regression for Phases 2–4.
           const numRaw = String(hn.number).trim();
 
           streetIdSet.forEach(streetId => {
