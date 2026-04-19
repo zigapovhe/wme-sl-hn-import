@@ -34,6 +34,7 @@
 
   let wmeSDK;
   const SDK_LAYER_NAME = 'qhnsl-sdk';
+  const SDK_NAVPOINTS_LAYER_NAME = 'qhnsl-navpoints';
 
   const MAX_CLICK_DISTANCE_PX = 25;
   const MAX_HN_CONFLICT_DISTANCE = 10;
@@ -1050,6 +1051,56 @@
 
       setupHouseNumberEventListeners();
 
+      function setupNavPoints(tabPane) {
+        const chkNavPoints = tabPane.querySelector('#qhnsl-navpoints');
+        if (!chkNavPoints) return;
+
+        let lastNavIds = [];
+        let currentRenderId = 0;
+        let renderTimer = null;
+
+        wmeSDK.Map.addLayer({
+          layerName: SDK_NAVPOINTS_LAYER_NAME,
+          zIndexing: true,
+          styleContext: {
+            getColor: ({ feature }) => {
+              const p = feature.properties;
+              if (p.forced)  return p.touched ? '#ff9933' : '#ff3333';
+              return p.touched ? '#ffffff' : '#ffdd00';
+            },
+            getLabel: ({ feature }) => String(feature.properties.number ?? '')
+          },
+          styleRules: [
+            {
+              predicate: (featureProperties) => featureProperties.kind === 'line',
+              style: {
+                strokeColor: '${getColor}',
+                strokeWidth: 2,
+                strokeOpacity: 0.9,
+                strokeDashstyle: 'dash',
+                fill: false
+              }
+            },
+            {
+              predicate: (featureProperties) => featureProperties.kind === 'label',
+              style: {
+                label: '${getLabel}',
+                fontColor: '#111111',
+                fontSize: '12px',
+                fontWeight: 'bold',
+                fontFamily: '"Open Sans", Arial, sans-serif',
+                labelOutlineColor: '${getColor}',
+                labelOutlineWidth: 3,
+                labelOutlineOpacity: 1,
+                pointRadius: 0,
+                stroke: false,
+                fill: false
+              }
+            }
+          ]
+        });
+      }
+
       ['qhnsl-load', 'qhnsl-clear'].forEach(id => {
         try { wmeSDK.Shortcuts.deleteShortcut({ shortcutId: id }); } catch (_) {}
       });
@@ -1279,6 +1330,8 @@
 
         return map;
       }
+
+      setupNavPoints(tabPane);
     });
   }
 
