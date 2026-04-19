@@ -1094,7 +1094,7 @@
           ]
         });
 
-        function clearLayer() {
+        function clearNavLayer() {
           if (!lastNavIds.length) return;
           try {
             wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_NAVPOINTS_LAYER_NAME, featureIds: lastNavIds });
@@ -1105,8 +1105,8 @@
         }
 
         async function renderNavPoints() {
-          if (!LS.getNavPoints()) { clearLayer(); return; }
-          if (wmeSDK.Map.getZoomLevel() < 18) { clearLayer(); return; }
+          if (!LS.getNavPoints()) { clearNavLayer(); return; }
+          if (wmeSDK.Map.getZoomLevel() < 18) { clearNavLayer(); return; }
 
           const myRenderId = ++currentRenderId;
 
@@ -1114,7 +1114,7 @@
             .filter(s => s.hasHouseNumbers)
             .map(s => s.id);
 
-          if (!segIds.length) { clearLayer(); return; }
+          if (!segIds.length) { clearNavLayer(); return; }
 
           let allHns;
           try {
@@ -1185,7 +1185,7 @@
           setChecked(chkNavPoints, on);
           LS.setNavPoints(on);
           if (on) scheduleRender();
-          else clearLayer();
+          else clearNavLayer();
         });
 
         if (LS.getNavPoints()) scheduleRender();
