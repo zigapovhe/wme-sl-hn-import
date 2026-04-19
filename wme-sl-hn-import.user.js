@@ -1136,10 +1136,11 @@
           const maxE = Math.ceil(tr[0]);
           const maxN = Math.ceil(tr[1]);
 
-          const selectionHNMap = getVisibleHNsByStreet();
-
-          fetchAddresses(minE, minN, maxE, maxN)
-            .then(apiFeatures => {
+          Promise.all([
+            fetchAddresses(minE, minN, maxE, maxN),
+            getVisibleHNsByStreet()
+          ])
+            .then(([apiFeatures, selectionHNMap]) => {
               // Bail out if user clicked Clear (or started a newer load) while the fetch was in flight
               if (loadId !== currentLoadId) {
                 loading.style.display = 'none';
@@ -1244,11 +1245,18 @@
       }
 
       // Visible HNs grouped by normalized street name (primary + alternate)
-      function getVisibleHNsByStreet() {
+      async function getVisibleHNsByStreet() {
         const map = new Map();
         const bounds = W.map.getExtent();
 
-        wmeSDK.DataModel.HouseNumbers.getAll().forEach(hn => {
+        const segIds = wmeSDK.DataModel.Segments.getAll()
+          .filter(s => s.hasHouseNumbers)
+          .map(s => s.id);
+        const allHns = segIds.length
+          ? await wmeSDK.DataModel.HouseNumbers.fetchHouseNumbers({ segmentIds: segIds })
+          : [];
+
+        allHns.forEach(hn => {
           const seg = wmeSDK.DataModel.Segments.getById({ segmentId: hn.segmentId });
           if (!seg) return;
 
