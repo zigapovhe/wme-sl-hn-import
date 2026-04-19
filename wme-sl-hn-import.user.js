@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WME Quick HN Importer - Slovenia
 // @namespace    https://github.com/zigapovhe/wme-sl-hn-import
-// @version      2.2.0
+// @version      2.3.0
 // @description  Quickly add Slovenian house numbers with clickable overlays
 // @author       ThatByte
 // @downloadURL  https://raw.githubusercontent.com/zigapovhe/wme-sl-hn-import/main/wme-sl-hn-import.user.js
@@ -34,6 +34,7 @@
 
   let wmeSDK;
   const SDK_LAYER_NAME = 'qhnsl-sdk';
+  const SDK_NAVPOINTS_LAYER_NAME = 'qhnsl-navpoints';
 
   const MAX_CLICK_DISTANCE_PX = 25;
   const MAX_HN_CONFLICT_DISTANCE = 10;
@@ -56,7 +57,9 @@
     getLayerVisible() { return localStorage.getItem('qhnsl-layer-visible') === '1'; },
     setLayerVisible(v){ localStorage.setItem('qhnsl-layer-visible', v ? '1' : '0'); },
     getSelectedOnly() { return localStorage.getItem('qhnsl-selected-only') === '1'; },
-    setSelectedOnly(v){ localStorage.setItem('qhnsl-selected-only', v ? '1' : '0'); }
+    setSelectedOnly(v){ localStorage.setItem('qhnsl-selected-only', v ? '1' : '0'); },
+    getNavPoints()    { return localStorage.getItem('qhnsl-navpoints') === '1'; },
+    setNavPoints(v)   { localStorage.setItem('qhnsl-navpoints', v ? '1' : '0'); }
   };
 
   const toast = (msg, type = 'info') => {
@@ -827,6 +830,7 @@
             <wz-checkbox id="hn-toggle">Show layer</wz-checkbox>
             <wz-checkbox id="qhnsl-missing">Show only missing</wz-checkbox>
             <wz-checkbox id="qhnsl-selected-only">Selected street only</wz-checkbox>
+            <wz-checkbox id="qhnsl-navpoints">Show HN NavPoints</wz-checkbox>
             <span style="font-size:12px;">Buffer (m): <input id="qhnsl-buffer" type="number" min="0" step="50" style="width:80px;margin-left:6px"></span>
           </div>
           <div id="hn-status" style="margin-top:10px;font-size:12px;color:#666;line-height:1.4;">
@@ -843,6 +847,7 @@
       const chkVis = tabPane.querySelector('#hn-toggle');
       chkMissing = tabPane.querySelector('#qhnsl-missing');
       chkSelectedOnly = tabPane.querySelector('#qhnsl-selected-only');
+      const chkNavPoints = tabPane.querySelector('#qhnsl-navpoints');
       const bufferEl   = tabPane.querySelector('#qhnsl-buffer');
       const statusDiv  = tabPane.querySelector('#hn-status');
 
@@ -862,6 +867,7 @@
       if (LS.getSelectedOnly()) {
         setChecked(chkSelectedOnly, true);
       }
+      setChecked(chkNavPoints, LS.getNavPoints());
 
       bufferEl.addEventListener('change', () => {
         const val = Number(bufferEl.value);
@@ -1038,6 +1044,170 @@
       }
 
       setupHouseNumberEventListeners();
+
+      function setupNavPoints(tabPane) {
+        const chkNavPoints = tabPane.querySelector('#qhnsl-navpoints');
+        if (!chkNavPoints) return;
+
+        let lastNavIds = [];
+        let currentRenderId = 0;
+        let renderTimer = null;
+
+        wmeSDK.Map.addLayer({
+          layerName: SDK_NAVPOINTS_LAYER_NAME,
+          zIndexing: true,
+          styleContext: {
+            getColor: ({ feature }) => {
+              const p = feature.properties;
+              if (p.forced)  return p.touched ? '#ff9933' : '#ff3333';
+              return p.touched ? '#ffffff' : '#ffdd00';
+            },
+            getLabel: ({ feature }) => String(feature.properties.number ?? '')
+          },
+          styleRules: [
+            {
+              predicate: (featureProperties) => featureProperties.kind === 'line',
+              style: {
+                strokeColor: '${getColor}',
+                strokeWidth: 2,
+                strokeOpacity: 0.9,
+                strokeDashstyle: 'dash',
+                fill: false
+              }
+            },
+            {
+              predicate: (featureProperties) => featureProperties.kind === 'label',
+              style: {
+                label: '${getLabel}',
+                fontColor: '#111111',
+                fontSize: '12px',
+                fontWeight: 'bold',
+                fontFamily: '"Open Sans", Arial, sans-serif',
+                labelOutlineColor: '${getColor}',
+                labelOutlineWidth: 3,
+                labelOutlineOpacity: 1,
+                pointRadius: 0,
+                stroke: false,
+                fill: false
+              }
+            }
+          ]
+        });
+
+        function clearNavLayer() {
+          if (!lastNavIds.length) return;
+          try {
+            wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_NAVPOINTS_LAYER_NAME, featureIds: lastNavIds });
+          } catch (e) {
+            console.debug('[SL-HN] NavPoints clearLayer:', e);
+          }
+          lastNavIds = [];
+        }
+
+        async function renderNavPoints() {
+          if (!LS.getNavPoints()) { clearNavLayer(); return; }
+          if (wmeSDK.Map.getZoomLevel() < 18) { clearNavLayer(); return; }
+
+          const myRenderId = ++currentRenderId;
+
+          const segIds = wmeSDK.DataModel.Segments.getAll()
+            .filter(s => s.hasHouseNumbers)
+            .map(s => s.id);
+
+          if (!segIds.length) { clearNavLayer(); return; }
+
+          let allHns;
+          try {
+            allHns = await wmeSDK.DataModel.HouseNumbers.fetchHouseNumbers({ segmentIds: segIds });
+          } catch (err) {
+            console.warn('[SL-HN] NavPoints fetch failed:', err);
+            return;
+          }
+
+          if (myRenderId !== currentRenderId) return;
+
+          const features = [];
+          for (const hn of allHns) {
+            const touched = hn.updatedBy != null;
+            const forced = hn.isForced === true;
+            if (hn.fractionPoint?.coordinates && hn.geometry?.coordinates) {
+              features.push({
+                type: 'Feature',
+                id: `navp-${hn.id}-line`,
+                geometry: {
+                  type: 'LineString',
+                  coordinates: [hn.fractionPoint.coordinates, hn.geometry.coordinates]
+                },
+                properties: { kind: 'line', touched, forced }
+              });
+            }
+            if (hn.geometry?.coordinates) {
+              features.push({
+                type: 'Feature',
+                id: `navp-${hn.id}-label`,
+                geometry: hn.geometry,
+                properties: { kind: 'label', number: hn.number, touched, forced }
+              });
+            }
+          }
+
+          if (lastNavIds.length) {
+            try {
+              wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_NAVPOINTS_LAYER_NAME, featureIds: lastNavIds });
+            } catch (e) {
+              console.debug('[SL-HN] NavPoints swap-clear:', e);
+            }
+          }
+
+          if (features.length) {
+            try {
+              wmeSDK.Map.addFeaturesToLayer({ layerName: SDK_NAVPOINTS_LAYER_NAME, features });
+            } catch (e) {
+              console.warn('[SL-HN] NavPoints addFeaturesToLayer:', e);
+              lastNavIds = [];
+              return;
+            }
+          }
+
+          lastNavIds = features.map(f => f.id);
+        }
+
+        function scheduleRender() {
+          if (renderTimer) clearTimeout(renderTimer);
+          renderTimer = setTimeout(() => {
+            renderTimer = null;
+            renderNavPoints().catch(err => console.warn('[SL-HN] NavPoints render failed:', err));
+          }, 300);
+        }
+
+        chkNavPoints.addEventListener('click', () => {
+          const on = !isChecked(chkNavPoints);
+          setChecked(chkNavPoints, on);
+          LS.setNavPoints(on);
+          if (on) scheduleRender();
+          else clearNavLayer();
+        });
+
+        if (LS.getNavPoints()) scheduleRender();
+
+        const NAVPOINTS_TRIGGER_EVENTS = [
+          'wme-map-zoom-changed',
+          'wme-map-move-end',
+          'wme-house-number-added',
+          'wme-house-number-deleted',
+          'wme-house-number-moved',
+          'wme-house-number-updated',
+          'wme-map-data-loaded'
+        ];
+        NAVPOINTS_TRIGGER_EVENTS.forEach(eventName => {
+          wmeSDK.Events.on({
+            eventName,
+            eventHandler: () => {
+              if (LS.getNavPoints()) scheduleRender();
+            }
+          });
+        });
+      }
 
       ['qhnsl-load', 'qhnsl-clear'].forEach(id => {
         try { wmeSDK.Shortcuts.deleteShortcut({ shortcutId: id }); } catch (_) {}
@@ -1268,6 +1438,8 @@
 
         return map;
       }
+
+      setupNavPoints(tabPane);
     });
   }
 
