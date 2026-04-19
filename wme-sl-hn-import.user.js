@@ -34,6 +34,7 @@
 
   let wmeSDK;
   const LAYER_NAME = 'Quick HN Importer - Slovenia';
+  const SDK_LAYER_NAME = 'qhnsl-sdk';
 
   const MAX_CLICK_DISTANCE_PX = 25;
   const MAX_HN_CONFLICT_DISTANCE = 10;
@@ -344,6 +345,7 @@
     let streetNames = {};
     let streets = {};
     let lastFeatures = [];
+    let lastSdkFeatureIds = [];
     let isLoading = false;
     let currentLoadId = 0;
     let userWantsLayerVisible = false;
@@ -409,12 +411,50 @@
     layer.setVisibility(false);
     W.map.addLayer(layer);
 
+    wmeSDK.Map.addLayer({
+      layerName: SDK_LAYER_NAME,
+      zIndexing: true,
+      styleContext: {
+        getFillColor: ({ feature }) => {
+          const p = feature.properties;
+          if (p.processed) return '#888888';
+          if (p.conflict)  return '#ff3333';
+          if (p.isSelectedStreet) return '#22cc66';
+          return '#ff9933';
+        },
+        getStrokeColor: ({ feature }) => {
+          const p = feature.properties;
+          if (p.processed) return '#666666';
+          if (p.conflict)  return '#990000';
+          if (p.isSelectedStreet) return '#117733';
+          return '#cc6600';
+        },
+        getOpacity: ({ feature }) => feature.properties.processed ? 0.35 : 1.0
+      },
+      styleRules: [{
+        style: {
+          fillColor: '${getFillColor}',
+          strokeColor: '${getStrokeColor}',
+          strokeWidth: 2,
+          pointRadius: 7,
+          fillOpacity: '${getOpacity}',
+          label: '${number}',
+          fontSize: '11px',
+          fontWeight: 'bold',
+          labelOutlineColor: '#ffffff',
+          labelOutlineWidth: 2
+        }
+      }]
+    });
+    wmeSDK.Map.setLayerVisibility({ layerName: SDK_LAYER_NAME, visibility: false });
+
     function updateLayerVisibility() {
       const currentZoom = W.map.getZoom();
       const shouldBeVisible = userWantsLayerVisible && currentZoom >= 18;
 
       if (layer.getVisibility() !== shouldBeVisible) {
         layer.setVisibility(shouldBeVisible);
+        wmeSDK.Map.setLayerVisibility({ layerName: SDK_LAYER_NAME, visibility: shouldBeVisible });
 
         if (userWantsLayerVisible && currentZoom < 18 && lastFeatures.length > 0) {
           toast('Zoom in to level 18+ to see house numbers', 'info');
@@ -952,6 +992,10 @@
         btnLoad.disabled = true;
         btnLoadLabel.textContent = 'Loading…';
 
+        if (lastSdkFeatureIds.length) {
+          wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_LAYER_NAME, featureIds: lastSdkFeatureIds });
+          lastSdkFeatureIds = [];
+        }
         layer.removeAllFeatures();
         streets = {};
         streetNames = {};
@@ -978,9 +1022,14 @@
 
       function clearLayer() {
         currentLoadId++; // invalidate any in-flight load so its results are discarded
+        if (lastSdkFeatureIds.length) {
+          wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_LAYER_NAME, featureIds: lastSdkFeatureIds });
+          lastSdkFeatureIds = [];
+        }
         layer.removeAllFeatures();
         userWantsLayerVisible = false;
         layer.setVisibility(false);
+        wmeSDK.Map.setLayerVisibility({ layerName: SDK_LAYER_NAME, visibility: false });
         setChecked(chkVis, false);
         LS.setLayerVisible(false);
         streets = {};
@@ -1209,7 +1258,27 @@
                 const count = features.reduce((n,f)=> n + (f.attributes?.street === sid ? 1 : 0), 0);
                 if (count > bestCount) { best = sid; bestCount = count; }
               });
+              const sdkFeatures = features.map((olFeat, i) => ({
+                type: 'Feature',
+                id: `qhnsl-${i}`,
+                geometry: {
+                  type: 'Point',
+                  coordinates: [olFeat.geometry.x, olFeat.geometry.y]
+                },
+                properties: {
+                  number: olFeat.attributes.number,
+                  street: olFeat.attributes.street,
+                  processed: olFeat.attributes.processed,
+                  conflict: olFeat.attributes.conflict,
+                  isSelectedStreet: false
+                }
+              }));
+
               currentStreetId = best || null;
+
+              sdkFeatures.forEach(f => {
+                f.properties.isSelectedStreet = f.properties.street === currentStreetId;
+              });
 
               if (!features.length) {
                 loading.style.display = 'none';
@@ -1226,6 +1295,12 @@
               } else {
                 currentStreetDiv.style.display = 'none';
               }
+
+              if (lastSdkFeatureIds.length) {
+                wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_LAYER_NAME, featureIds: lastSdkFeatureIds });
+              }
+              wmeSDK.Map.addFeaturesToLayer({ layerName: SDK_LAYER_NAME, features: sdkFeatures });
+              lastSdkFeatureIds = sdkFeatures.map(f => f.id);
 
               layer.removeAllFeatures();
               applyFeatureFilter();
