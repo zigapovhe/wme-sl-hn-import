@@ -1308,8 +1308,12 @@
     wmeSDK = getWmeSdk({ scriptId: 'quick-hn-sl-importer', scriptName: 'Quick HN Importer (SI)' });
     wmeSDK.Events.once({ eventName: 'wme-ready' }).then(() => {
       const required = [
+        'DataModel.Segments.getAll',
         'DataModel.Segments.getById',
+        'DataModel.Streets.getAll',
+        'DataModel.Streets.getById',
         'DataModel.Streets.getStreet',
+        'DataModel.HouseNumbers.fetchHouseNumbers',
         'DataModel.HouseNumbers.addHouseNumber',
         'Editing.setSelection',
         'Editing.getSelection',
