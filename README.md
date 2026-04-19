@@ -115,7 +115,7 @@ EProstor coordinates are normally precise, but always visually verify before add
 
 ## 🧩 Technical Info
 
-- Uses WME SDK (`getWmeSdk`) for UI, house numbers, segment updates, and keyboard shortcuts
+- Uses WME SDK (`getWmeSdk`) for UI, house numbers, segments, streets, selection, map layer rendering, events, and keyboard shortcuts
 - Calls EProstor OGC API Features using `GM_xmlhttpRequest`
 - Reprojects EPSG:3794 (Slovenia D96/TM) → EPSG:3857 (Web Mercator) using `proj4js`
 - CQL filters for coordinate-based queries

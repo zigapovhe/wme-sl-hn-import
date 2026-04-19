@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WME Quick HN Importer - Slovenia
 // @namespace    https://github.com/zigapovhe/wme-sl-hn-import
-// @version      2.1.2
+// @version      2.2.0
 // @description  Quickly add Slovenian house numbers with clickable overlays
 // @author       ThatByte
 // @downloadURL  https://raw.githubusercontent.com/zigapovhe/wme-sl-hn-import/main/wme-sl-hn-import.user.js
@@ -27,7 +27,7 @@
  * Tom 'Glodenox' Puttemans (https://github.com/Glodenox/wme-quick-hn-importer)
  */
 
-/* global W, OpenLayers, I18n, proj4, getWmeSdk, unsafeWindow */
+/* global I18n, proj4, getWmeSdk, unsafeWindow */
 
 (function () {
   'use strict';
