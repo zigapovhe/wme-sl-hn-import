@@ -1106,6 +1106,7 @@
 
         async function renderNavPoints() {
           if (!LS.getNavPoints()) { clearLayer(); return; }
+          if (wmeSDK.Map.getZoomLevel() < 18) { clearLayer(); return; }
 
           const myRenderId = ++currentRenderId;
 
