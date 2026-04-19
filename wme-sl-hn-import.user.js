@@ -1107,42 +1107,37 @@
 
           loading.style.display = null;
 
-          let bounds = null;
+          // Compute bounding box of selected segments in WGS84 from GeoJSON coords
+          let minLon = Infinity, maxLon = -Infinity;
+          let minLat = Infinity, maxLat = -Infinity;
           selectedSegments.forEach(seg => {
-            const g = getSegmentGeometry(seg);
-            if (!g) return;
-            const b = g.getBounds();
-            if (!b) return;
-
-            if (bounds == null) {
-              bounds = b.clone();
-            } else {
-              bounds.extend(b);
-            }
+            const coords = seg.geometry?.coordinates;
+            if (!Array.isArray(coords)) return;
+            coords.forEach(pt => {
+              const lon = pt[0], lat = pt[1];
+              if (lon < minLon) minLon = lon;
+              if (lon > maxLon) maxLon = lon;
+              if (lat < minLat) minLat = lat;
+              if (lat > maxLat) maxLat = lat;
+            });
           });
 
-          if (!bounds) {
+          if (minLon === Infinity) {
             loading.style.display = 'none';
             statusDiv.textContent = 'No geometry for selected segments.';
             resolve();
             return;
           }
 
+          // Convert WGS84 bbox to EPSG:3794 (Slovenia D96/TM, in meters), then buffer
+          const bl = proj4('EPSG:4326', 'EPSG:3794', [minLon, minLat]);
+          const tr = proj4('EPSG:4326', 'EPSG:3794', [maxLon, maxLat]);
           const buffer = LS.getBuffer();
-          const b = bounds.clone();
-          b.left  -= buffer;
-          b.right += buffer;
-          b.bottom -= buffer;
-          b.top   += buffer;
 
-          // Convert bounds from EPSG:3857 to EPSG:3794
-          const bl = proj4('EPSG:3857', 'EPSG:3794', [b.left,  b.bottom]);
-          const tr = proj4('EPSG:3857', 'EPSG:3794', [b.right, b.top]);
-
-          const minE = Math.floor(bl[0]);
-          const minN = Math.floor(bl[1]);
-          const maxE = Math.ceil(tr[0]);
-          const maxN = Math.ceil(tr[1]);
+          const minE = Math.floor(bl[0] - buffer);
+          const minN = Math.floor(bl[1] - buffer);
+          const maxE = Math.ceil(tr[0]  + buffer);
+          const maxN = Math.ceil(tr[1]  + buffer);
 
           Promise.all([
             fetchAddresses(minE, minN, maxE, maxN),
