@@ -658,40 +658,21 @@
     }
 
 
-    // Click hit-test in pixel space (geometry EPSG:3857, W.map expects EPSG:4326)
     function handleMapClick(evt) {
       if (!userWantsLayerVisible || !lastFeatures.length) return;
+      if (evt == null || evt.x == null || evt.y == null) return;
 
-      const clickPx = evt.xy;
-      if (!clickPx) return;
-
-      const features = lastFeatures;
       const MAX_PIXELS_SQ = MAX_CLICK_DISTANCE_PX * MAX_CLICK_DISTANCE_PX;
-
       let bestFeature = null;
       let bestDistSq = Infinity;
 
-      for (let i = 0; i < features.length; i++) {
-        const f = features[i];
-        const g = f.geometry;
-        if (!g) continue;
-
-        let lonLat;
-        try {
-          const [lon, lat] = proj4('EPSG:3857', 'EPSG:4326', [g.x, g.y]);
-          lonLat = new OpenLayers.LonLat(lon, lat);
-        } catch (e) {
-          console.warn('[SL-HN] Failed to transform point for hit-test:', e);
-          continue;
-        }
-
-        const fPx = W.map.getPixelFromLonLat(lonLat);
+      for (const f of lastFeatures) {
+        if (f.lon == null || f.lat == null) continue;
+        const fPx = wmeSDK.Map.getMapPixelFromLonLat({ lonLat: { lon: f.lon, lat: f.lat } });
         if (!fPx) continue;
-
-        const dx = fPx.x - clickPx.x;
-        const dy = fPx.y - clickPx.y;
+        const dx = fPx.x - evt.x;
+        const dy = fPx.y - evt.y;
         const d2 = dx * dx + dy * dy;
-
         if (d2 <= MAX_PIXELS_SQ && d2 < bestDistSq) {
           bestDistSq = d2;
           bestFeature = f;
@@ -699,18 +680,16 @@
       }
 
       if (!bestFeature) return;
-
       onFeatureClick(bestFeature);
     }
 
     wmeSDK.Events.on({ eventName: 'wme-map-mouse-click', eventHandler: handleMapClick });
 
     function onFeatureClick(feature) {
-      const attrs = feature.attributes || {};
-      if (attrs.processed) return;
+      if (feature.processed) return;
 
-      const streetName = streetNames[attrs.street];
-      const houseNumber = attrs.number;
+      const streetName = streetNames[feature.street];
+      const houseNumber = feature.number;
 
       let nearestSegment = findNearestSegment(feature, streetName, true);
 
@@ -733,16 +712,9 @@
       wmeSDK.Editing.setSelection({ selection: { ids: [nearestSegment.id], objectType: 'segment' } });
 
       try {
-        const [lon, lat] = proj4('EPSG:3857', 'EPSG:4326', [feature.geometry.x, feature.geometry.y]);
-
-        const geojsonGeometry = {
-          type: 'Point',
-          coordinates: [lon, lat]
-        };
-
         wmeSDK.DataModel.HouseNumbers.addHouseNumber({
           number: houseNumber,
-          point: geojsonGeometry,
+          point: { type: 'Point', coordinates: [feature.lon, feature.lat] },
           segmentId: nearestSegment.id
         });
 
@@ -755,7 +727,7 @@
     }
 
     function findNearestSegment(feature, streetName, matchName) {
-      const point = feature.geometry;
+      const point = { x: feature.lon, y: feature.lat };
       const allSegments = wmeSDK.DataModel.Segments.getAll();
       let candidateSegments = allSegments;
 
@@ -783,10 +755,9 @@
       let minDistance = Infinity;
 
       candidateSegments.forEach(segment => {
-        const geom = getSegmentGeometry(segment);
-        if (!geom) return;
-
-        const distance = pointToLineDistance(point, geom);
+        const coords = segment.geometry?.coordinates;
+        if (!Array.isArray(coords) || coords.length < 2) return;
+        const distance = pointToLineDistance(point, coords);
         if (distance < minDistance) {
           minDistance = distance;
           nearestSegment = segment;
@@ -796,23 +767,16 @@
       return nearestSegment;
     }
 
-    function pointToLineDistance(point, line) {
+    function pointToLineDistance(point, coords) {
       const px = point.x;
       const py = point.y;
-      const coords = line.getVertices();
-
       let minDist = Infinity;
-
       for (let i = 0; i < coords.length - 1; i++) {
-        const x1 = coords[i].x;
-        const y1 = coords[i].y;
-        const x2 = coords[i + 1].x;
-        const y2 = coords[i + 1].y;
-
+        const [x1, y1] = coords[i];
+        const [x2, y2] = coords[i + 1];
         const dist = pointToSegmentDistance(px, py, x1, y1, x2, y2);
-        minDist = Math.min(minDist, dist);
+        if (dist < minDist) minDist = dist;
       }
-
       return minDist;
     }
 
