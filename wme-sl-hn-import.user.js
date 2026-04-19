@@ -282,8 +282,8 @@
 
     // Get current city from the segment
     const currentStreetId = segment.attributes.primaryStreetID;
-    const currentStreet = currentStreetId ? W.model.streets.getObjectById(currentStreetId) : null;
-    const cityId = currentStreet?.attributes?.cityID;
+    const currentStreet = currentStreetId ? wmeSDK.DataModel.Streets.getStreet({ streetId: currentStreetId }) : null;
+    const cityId = currentStreet?.cityID;
 
     if (!cityId) {
       toast('Segment has no city assigned', 'warning');
@@ -422,8 +422,8 @@
       const primaryStreetId = seg.attributes.primaryStreetID;
       if (!primaryStreetId) return null;
 
-      const street = W.model.streets.getObjectById(primaryStreetId);
-      return street?.attributes?.name || null;
+      const street = wmeSDK.DataModel.Streets.getStreet({ streetId: primaryStreetId });
+      return street?.name || null;
     }
 
     // Analyze street name matches and update UI
@@ -612,7 +612,7 @@
       }
 
       const selectedStreetNames = Array.from(selectedStreetIds)
-        .map(id => W.model.streets.getObjectById(id)?.attributes?.name)
+        .map(id => wmeSDK.DataModel.Streets.getStreet({ streetId: id })?.name)
         .filter(Boolean);
 
       let newStreetId = null;
@@ -722,8 +722,8 @@
           return;
         }
 
-        const nearestStreet = W.model.streets.getObjectById(nearestSegment.attributes.primaryStreetID);
-        const nearestStreetName = nearestStreet?.attributes?.name || 'Unknown';
+        const nearestStreet = wmeSDK.DataModel.Streets.getStreet({ streetId: nearestSegment.primaryStreetId });
+        const nearestStreetName = nearestStreet?.name || 'Unknown';
 
         if (!confirm(`Street name "${streetName}" could not be found.\n\nDo you want to add this number to "${nearestStreetName}"?`)) {
           return;
@@ -743,7 +743,7 @@
         wmeSDK.DataModel.HouseNumbers.addHouseNumber({
           number: houseNumber,
           point: geojsonGeometry,
-          segmentId: nearestSegment.attributes.id
+          segmentId: nearestSegment.id
         });
 
         console.log('[SL-HN] Added house number', houseNumber);
@@ -756,21 +756,21 @@
 
     function findNearestSegment(feature, streetName, matchName) {
       const point = feature.geometry;
-      const allSegments = W.model.segments.getObjectArray();
+      const allSegments = wmeSDK.DataModel.Segments.getAll();
       let candidateSegments = allSegments;
 
       if (matchName) {
-        const matchingStreetIds = W.model.streets.getObjectArray()
-          .filter(street => street.attributes?.name?.toLowerCase() === streetName.toLowerCase())
-          .map(street => street.attributes.id);
+        const matchingStreetIds = wmeSDK.DataModel.Streets.getAll()
+          .filter(street => street.name?.toLowerCase() === streetName.toLowerCase())
+          .map(street => street.id);
 
         if (matchingStreetIds.length === 0) {
           return null;
         }
 
         candidateSegments = allSegments.filter(segment => {
-          const primaryMatch = matchingStreetIds.includes(segment.attributes.primaryStreetID);
-          const altMatch = (segment.attributes.streetIDs || []).some(id => matchingStreetIds.includes(id));
+          const primaryMatch = matchingStreetIds.includes(segment.primaryStreetId);
+          const altMatch = (segment.alternateStreetIds || []).some(id => matchingStreetIds.includes(id));
           return primaryMatch || altMatch;
         });
       }
@@ -1189,8 +1189,8 @@
                 (seg.attributes.streetIDs || []).forEach(id => allStreetIds.add(id));
                 if (seg.attributes.primaryStreetID) allStreetIds.add(seg.attributes.primaryStreetID);
               });
-              const selectedNames = W.model.streets.getByIds([...allStreetIds])
-                .map(s => s?.attributes?.name)
+              const selectedNames = [...allStreetIds]
+                .map(id => wmeSDK.DataModel.Streets.getStreet({ streetId: id })?.name)
                 .filter(Boolean);
 
               let best = null, bestCount = -1;
@@ -1243,15 +1243,15 @@
         const map = new Map();
         const bounds = W.map.getExtent();
 
-        W.model.segmentHouseNumbers.getObjectArray().forEach(hn => {
-          const seg = W.model.segments.getObjectById(hn.attributes.segID);
+        wmeSDK.DataModel.HouseNumbers.getAll().forEach(hn => {
+          const seg = wmeSDK.DataModel.Segments.getById({ segmentId: hn.segmentId });
           if (!seg) return;
 
           const streetIdSet = new Set();
-          if (seg.attributes.primaryStreetID) {
-            streetIdSet.add(seg.attributes.primaryStreetID);
+          if (seg.primaryStreetId) {
+            streetIdSet.add(seg.primaryStreetId);
           }
-          (seg.attributes.streetIDs || []).forEach(id => {
+          (seg.alternateStreetIds || []).forEach(id => {
             if (id) streetIdSet.add(id);
           });
           if (!streetIdSet.size) return;
@@ -1264,11 +1264,12 @@
           }
           if (x == null || y == null || !bounds.containsLonLat({ lon: x, lat: y })) return;
 
-          const numRaw = String(hn.attributes.number).trim();
+          // NOTE: hn.number is from SDK (Phase 5 will fix coordinate system for geometry)
+          const numRaw = String(hn.number).trim();
 
           streetIdSet.forEach(streetId => {
-            const st = W.model.streets.getObjectById(streetId);
-            const name = st?.attributes?.name;
+            const st = wmeSDK.DataModel.Streets.getStreet({ streetId });
+            const name = st?.name;
             if (!name) return;
 
             const sidNorm = normalizeStreetName(name);
