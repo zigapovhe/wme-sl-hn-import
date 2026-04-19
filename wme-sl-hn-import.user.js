@@ -33,7 +33,6 @@
   'use strict';
 
   let wmeSDK;
-  const LAYER_NAME = 'Quick HN Importer - Slovenia';
   const SDK_LAYER_NAME = 'qhnsl-sdk';
 
   const MAX_CLICK_DISTANCE_PX = 25;
@@ -156,21 +155,9 @@
     return dp[m][n];
   }
 
-  function getSegmentGeometry(seg) {
-    if (!seg) return null;
-    if (typeof seg.getOLGeometry === 'function') return seg.getOLGeometry();
-    return seg.geometry || seg.attributes?.geometry || null;
-  }
-
   function getHNGeometry(hn) {
-    if (!hn) return null;
-    if (typeof hn.getOLGeometry === 'function') return hn.getOLGeometry();
-    // SDK HN objects have geometry as GeoJSON Point {type, coordinates: [lon, lat]}
-    // Return {x, y} so existing callers work regardless of source.
-    if (hn.geometry?.type === 'Point' && Array.isArray(hn.geometry.coordinates)) {
-      return { x: hn.geometry.coordinates[0], y: hn.geometry.coordinates[1] };
-    }
-    return hn.geometry || hn.attributes?.geometry || null;
+    if (!hn?.geometry?.coordinates) return null;
+    return { x: hn.geometry.coordinates[0], y: hn.geometry.coordinates[1] };
   }
 
   function getSelectedSegments() {
@@ -402,13 +389,17 @@
     });
     wmeSDK.Map.setLayerVisibility({ layerName: SDK_LAYER_NAME, visibility: false });
 
+    let lastComputedVisibility = false;
     function updateLayerVisibility() {
       const currentZoom = wmeSDK.Map.getZoomLevel();
       const shouldBeVisible = userWantsLayerVisible && currentZoom >= 18;
 
+      if (shouldBeVisible === lastComputedVisibility) return;
+      lastComputedVisibility = shouldBeVisible;
+
       wmeSDK.Map.setLayerVisibility({ layerName: SDK_LAYER_NAME, visibility: shouldBeVisible });
 
-      if (userWantsLayerVisible && currentZoom < 18 && lastFeatures.length > 0) {
+      if (userWantsLayerVisible && !shouldBeVisible && lastFeatures.length > 0) {
         toast('Zoom in to level 18+ to see house numbers', 'info');
       }
     }
@@ -963,7 +954,7 @@
         const selectedOnly = chkSelectedOnly?.hasAttribute('checked');
         const visible = lastFeatures.filter(feat => {
           if (onlyMissing && feat.processed) return false;
-          if (selectedOnly && feat.street !== currentStreetId) return false;
+          if (selectedOnly && currentStreetId && feat.street !== currentStreetId) return false;
           return true;
         });
         if (lastSdkFeatureIds.length) {
@@ -1018,7 +1009,7 @@
             eventName,
             eventHandler: () => {
               if (lastFeatures.length > 0) {
-                recalculateFeatureStates();
+                recalculateFeatureStates().catch(err => console.warn('[SL-HN] recalculate failed:', err));
               }
             }
           });
@@ -1028,7 +1019,7 @@
           eventName: 'wme-map-data-loaded',
           eventHandler: () => {
             if (lastFeatures.length > 0) {
-              recalculateFeatureStates();
+              recalculateFeatureStates().catch(err => console.warn('[SL-HN] recalculate failed:', err));
             }
           }
         });
@@ -1295,8 +1286,7 @@
         'Editing.getSelection',
         'Map.addLayer',
         'Map.addFeaturesToLayer',
-        'Map.removeLayer',
-        'Map.removeFeatureFromLayer',
+        'Map.removeFeaturesFromLayer',
         'Map.setLayerVisibility',
         'Map.getZoomLevel',
         'Map.getMapExtent',
