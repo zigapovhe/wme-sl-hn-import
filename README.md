@@ -37,6 +37,15 @@ No manual typing is needed — just click.
 - Show only the selected street  
 - Adjust the buffer distance (default: 500 m)
 
+### ⌨️ Keyboard Shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| `Alt+Shift+L` | Load selected street |
+| `Alt+Shift+K` | Clear |
+
+Shortcuts are registered via the WME SDK and appear in the WME keyboard shortcuts dialog. You can reassign them there.
+
 ---
 
 ## 🆕 Street Name Validation (v2.1.0)
@@ -106,7 +115,7 @@ EProstor coordinates are normally precise, but always visually verify before add
 
 ## 🧩 Technical Info
 
-- Uses WME SDK (`getWmeSdk`) for UI, house numbers, and segment updates
+- Uses WME SDK (`getWmeSdk`) for UI, house numbers, segment updates, and keyboard shortcuts
 - Calls EProstor OGC API Features using `GM_xmlhttpRequest`
 - Reprojects EPSG:3794 (Slovenia D96/TM) → EPSG:3857 (Web Mercator) using `proj4js`
 - CQL filters for coordinate-based queries

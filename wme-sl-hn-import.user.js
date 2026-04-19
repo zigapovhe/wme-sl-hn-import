@@ -851,8 +851,8 @@
         <div id="qhnsl-pane" style="padding:10px;">
           <h2 style="margin-top:0;">Quick HN Importer 🇸🇮</h2>
           <div style="display:flex;gap:6px;flex-wrap:wrap;margin:4px 0 8px 0;">
-            <button id="hn-load" class="wz-button">Load selected street</button>
-            <button id="hn-clear" class="wz-button wz-button--secondary">Clear</button>
+            <button id="hn-load" class="wz-button"><span id="hn-load-label">Load selected street</span> <kbd style="font-size:10px;background:#e0e0e0;border:1px solid #aaa;border-radius:3px;padding:1px 4px;">Alt+Shift+L</kbd></button>
+            <button id="hn-clear" class="wz-button wz-button--secondary">Clear <kbd style="font-size:10px;background:#e0e0e0;border:1px solid #aaa;border-radius:3px;padding:1px 4px;">Alt+Shift+K</kbd></button>
           </div>
           <div id="hn-current-street" style="margin:8px 0;padding:8px;background:#f0f0f0;border-radius:4px;font-size:13px;display:none;">
             <b>WME selected street:</b> <span id="hn-street-name" style="color:#2a7;font-weight:bold;">—</span>
@@ -872,8 +872,9 @@
         </div>
       `;
 
-      const btnLoad    = tabPane.querySelector('#hn-load');
-      const btnClear   = tabPane.querySelector('#hn-clear');
+      const btnLoad      = tabPane.querySelector('#hn-load');
+      const btnLoadLabel = tabPane.querySelector('#hn-load-label');
+      const btnClear     = tabPane.querySelector('#hn-clear');
       const chkVis = tabPane.querySelector('#hn-toggle');
       chkMissing = tabPane.querySelector('#qhnsl-missing');
       chkSelectedOnly = tabPane.querySelector('#qhnsl-selected-only');
@@ -926,11 +927,11 @@
         applyFeatureFilter();
       });
 
-      btnLoad.addEventListener('click', async () => {
+      async function loadSelectedStreet() {
         if (isLoading) return;
         isLoading = true;
         btnLoad.disabled = true;
-        btnLoad.textContent = 'Loading…';
+        btnLoadLabel.textContent = 'Loading…';
 
         layer.removeAllFeatures();
         streets = {};
@@ -946,11 +947,13 @@
         updateLayerVisibility();
 
         btnLoad.disabled = false;
-        btnLoad.textContent = 'Load selected street';
+        btnLoadLabel.textContent = 'Load selected street';
         isLoading = false;
-      });
+      }
 
-      btnClear.addEventListener('click', () => {
+      btnLoad.addEventListener('click', loadSelectedStreet);
+
+      function clearLayer() {
         layer.removeAllFeatures();
         userWantsLayerVisible = false;
         layer.setVisibility(false);
@@ -965,7 +968,9 @@
         statusDiv.innerHTML = `<b>Instructions</b><br/>
           1) Select a segment • 2) Click "Load selected street" • 3) <b>Click house numbers on map to add them</b><br/>
           Green = selected street • Orange = other streets • Red = possible wrong HN • Faded = already in WME`;
-      });
+      }
+
+      btnClear.addEventListener('click', clearLayer);
 
       applyFeatureFilter = function () {
         const onlyMissing = chkMissing?.hasAttribute('checked');
@@ -1054,6 +1059,17 @@
       }
 
       setupHouseNumberEventListeners();
+
+      ['qhnsl-load', 'qhnsl-clear'].forEach(id => {
+        try { wmeSDK.Shortcuts.deleteShortcut({ shortcutId: id }); } catch (_) {}
+      });
+      [
+        { shortcutId: 'qhnsl-load',  shortcutKeys: 'AS+l', description: 'SL-HN: Load selected street', callback: loadSelectedStreet },
+        { shortcutId: 'qhnsl-clear', shortcutKeys: 'AS+k', description: 'SL-HN: Clear',                callback: clearLayer }
+      ].forEach(spec => {
+        try { wmeSDK.Shortcuts.createShortcut(spec); }
+        catch (e) { console.warn('SL-HN: failed to register shortcut', spec.shortcutId, e); }
+      });
 
       function updateLayer(statusDiv) {
         return new Promise((resolve) => {
