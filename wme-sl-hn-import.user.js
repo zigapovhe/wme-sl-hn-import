@@ -359,57 +359,9 @@
     let applyFeatureFilter = () => {};
     let analyzeStreetMatches = () => {};
 
-    const layer = new OpenLayers.Layer.Vector(LAYER_NAME, {
-      uniqueName: 'quick-hn-sl-importer',
-      styleMap: new OpenLayers.StyleMap({
-        default: new OpenLayers.Style(
-          {
-            fillColor: '${fillColor}',
-            fillOpacity: '${opacity}',
-            fontColor: '#111111',
-            fontWeight: 'bold',
-            strokeColor: '#ffffff',
-            strokeOpacity: '${opacity}',
-            strokeWidth: 2,
-            pointRadius: '${radius}',
-            label: '${number}',
-            title: '${title}',
-            cursor: '${cursor}',
-          },
-          {
-            context: {
-              fillColor: f => {
-                const a = f.attributes || {};
-                if (a.conflict) return '#ff6666';
-                return (a.street === currentStreetId) ? '#99ee99' : '#fb9c4f';
-              },
-              radius: f => (f.attributes && f.attributes.number)
-                ? Math.max(f.attributes.number.length * 7, 12)
-                : 12,
-              opacity: f => {
-                const a = f.attributes || {};
-                if (a.conflict) return 1;
-                return (currentStreetId && a.street === currentStreetId && a.processed) ? 0.3 : 1;
-              },
-              cursor: f => {
-                const a = f.attributes || {};
-                return (a.processed) ? '' : 'pointer';
-              },
-              title: f => (f.attributes && f.attributes.number && f.attributes.street)
-                ? `${streetNames[f.attributes.street]} ${f.attributes.number}`
-                : ''
-            }
-          }
-        ),
-      }),
-    });
-
     try {
       I18n.translations[I18n.currentLocale()].layers.name['quick-hn-sl-importer'] = 'Quick HN Importer';
     } catch (_) {}
-
-    layer.setVisibility(false);
-    W.map.addLayer(layer);
 
     wmeSDK.Map.addLayer({
       layerName: SDK_LAYER_NAME,
@@ -449,16 +401,13 @@
     wmeSDK.Map.setLayerVisibility({ layerName: SDK_LAYER_NAME, visibility: false });
 
     function updateLayerVisibility() {
-      const currentZoom = W.map.getZoom();
+      const currentZoom = wmeSDK.Map.getZoomLevel();
       const shouldBeVisible = userWantsLayerVisible && currentZoom >= 18;
 
-      if (layer.getVisibility() !== shouldBeVisible) {
-        layer.setVisibility(shouldBeVisible);
-        wmeSDK.Map.setLayerVisibility({ layerName: SDK_LAYER_NAME, visibility: shouldBeVisible });
+      wmeSDK.Map.setLayerVisibility({ layerName: SDK_LAYER_NAME, visibility: shouldBeVisible });
 
-        if (userWantsLayerVisible && currentZoom < 18 && lastFeatures.length > 0) {
-          toast('Zoom in to level 18+ to see house numbers', 'info');
-        }
+      if (userWantsLayerVisible && currentZoom < 18 && lastFeatures.length > 0) {
+        toast('Zoom in to level 18+ to see house numbers', 'info');
       }
     }
 
@@ -492,7 +441,7 @@
       // Count addresses per official street name
       const streetCounts = {};
       lastFeatures.forEach(f => {
-        const name = streetNames[f.attributes.street];
+        const name = streetNames[f.street];
         if (!name) return;
         streetCounts[name] = (streetCounts[name] || 0) + 1;
       });
@@ -627,7 +576,6 @@
             setTimeout(() => {
               analyzeStreetMatches();
               applyFeatureFilter();
-              layer.redraw();
             }, 100);
           });
         });
@@ -658,7 +606,6 @@
           streetNameSpan.textContent = '—';
           currentStreetDiv.style.display = 'none';
         }
-        layer.redraw();
         applyFeatureFilter();
         analyzeStreetMatches();
         return;
@@ -675,7 +622,7 @@
         const sid = streets[name];
         if (!sid) return;
         const count = lastFeatures.reduce(
-          (n, f) => n + (f.attributes?.street === sid ? 1 : 0),
+          (n, f) => n + (f.street === sid ? 1 : 0),
           0
         );
         if (count > bestCount) {
@@ -690,7 +637,6 @@
           streetNameSpan.textContent = '—';
           currentStreetDiv.style.display = 'none';
         }
-        layer.redraw();
         applyFeatureFilter();
         analyzeStreetMatches();
         return;
@@ -705,7 +651,6 @@
         currentStreetDiv.style.display = 'block';
       }
 
-      layer.redraw();
       applyFeatureFilter();
       analyzeStreetMatches();
     }
@@ -713,12 +658,12 @@
 
     // Click hit-test in pixel space (geometry EPSG:3857, W.map expects EPSG:4326)
     function handleMapClick(evt) {
-      if (!layer.getVisibility() || !layer.features || !layer.features.length) return;
+      if (!userWantsLayerVisible || !lastFeatures.length) return;
 
       const clickPx = evt.xy;
       if (!clickPx) return;
 
-      const features = layer.features;
+      const features = lastFeatures;
       const MAX_PIXELS_SQ = MAX_CLICK_DISTANCE_PX * MAX_CLICK_DISTANCE_PX;
 
       let bestFeature = null;
@@ -996,7 +941,6 @@
           wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_LAYER_NAME, featureIds: lastSdkFeatureIds });
           lastSdkFeatureIds = [];
         }
-        layer.removeAllFeatures();
         streets = {};
         streetNames = {};
         currentStreetId = null;
@@ -1026,9 +970,7 @@
           wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_LAYER_NAME, featureIds: lastSdkFeatureIds });
           lastSdkFeatureIds = [];
         }
-        layer.removeAllFeatures();
         userWantsLayerVisible = false;
-        layer.setVisibility(false);
         wmeSDK.Map.setLayerVisibility({ layerName: SDK_LAYER_NAME, visibility: false });
         setChecked(chkVis, false);
         LS.setLayerVisible(false);
@@ -1046,23 +988,30 @@
       btnClear.addEventListener('click', clearLayer);
 
       applyFeatureFilter = function () {
-        const onlyMissing = chkMissing?.hasAttribute('checked');
+        const onlyMissing  = chkMissing?.hasAttribute('checked');
         const selectedOnly = chkSelectedOnly?.hasAttribute('checked');
-
-        layer.removeAllFeatures();
-        if (!lastFeatures.length) return;
-
-        let filtered = lastFeatures;
-
-        if (selectedOnly && currentStreetId) {
-          filtered = filtered.filter(f => f.attributes?.street === currentStreetId);
+        const visible = lastFeatures.filter(feat => {
+          if (onlyMissing && feat.processed) return false;
+          if (selectedOnly && feat.street !== currentStreetId) return false;
+          return true;
+        });
+        if (lastSdkFeatureIds.length) {
+          wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_LAYER_NAME, featureIds: lastSdkFeatureIds });
         }
-
-        if (onlyMissing) {
-          filtered = filtered.filter(f => f.attributes?.conflict || !f.attributes?.processed);
-        }
-
-        layer.addFeatures(filtered);
+        const visibleSdk = visible.map((feat, i) => ({
+          type: 'Feature',
+          id: `qhnsl-${i}`,
+          geometry: { type: 'Point', coordinates: [feat.lon, feat.lat] },
+          properties: {
+            number: feat.number,
+            street: feat.street,
+            processed: feat.processed,
+            conflict: feat.conflict,
+            isSelectedStreet: feat.street === currentStreetId
+          }
+        }));
+        wmeSDK.Map.addFeaturesToLayer({ layerName: SDK_LAYER_NAME, features: visibleSdk });
+        lastSdkFeatureIds = visibleSdk.map(f => f.id);
       };
 
       async function recalculateFeatureStates() {
@@ -1070,22 +1019,19 @@
 
         const selectionHNMap = await getVisibleHNsByStreet();
 
-        lastFeatures.forEach(feature => {
-          const { number: hn, street: streetId } = feature.attributes;
+        lastFeatures.forEach(feat => {
+          const { number: hn, street: streetId, lon, lat } = feat;
           if (!hn || !streetId) return;
-
-          const wx = feature.geometry.x;
-          const wy = feature.geometry.y;
 
           const entry = selectionHNMap.get(streetId);
           const processed = entry?.set.has(hn) === true;
-          const conflict = !processed && hasConflict(hn, wx, wy, entry);
+          const conflict = !processed && hasConflict(hn, lon, lat, entry);
 
-          feature.attributes.processed = processed;
-          feature.attributes.conflict = conflict;
+          feat.processed = processed;
+          feat.conflict = conflict;
         });
 
-        layer.redraw();
+        applyFeatureFilter();
       }
 
       function setupHouseNumberEventListeners() {
@@ -1101,7 +1047,7 @@
             eventName,
             eventHandler: () => {
               if (lastFeatures.length > 0) {
-                recalculateFeatureStates().then(applyFeatureFilter);
+                recalculateFeatureStates();
               }
             }
           });
@@ -1111,7 +1057,7 @@
           eventName: 'wme-map-data-loaded',
           eventHandler: () => {
             if (lastFeatures.length > 0) {
-              recalculateFeatureStates().then(applyFeatureFilter);
+              recalculateFeatureStates();
             }
           }
         });
@@ -1123,7 +1069,7 @@
             if (lastFeatures.length > 0) {
               // Refresh the street analysis panel to reflect any street name changes
               analyzeStreetMatches();
-              layer.redraw();
+              applyFeatureFilter();
             }
           }
         });
@@ -1209,8 +1155,8 @@
                 const n = props.N;
                 if (e == null || n == null) continue;
 
-                // Convert from EPSG:3794 to EPSG:3857
-                const [wx, wy] = proj4('EPSG:3794', 'EPSG:3857', [e, n]);
+                // Convert from EPSG:3794 to EPSG:4326
+                const [lon, lat] = proj4('EPSG:3794', 'EPSG:4326', [e, n]);
 
                 // Build house number from components
                 const hn = buildHouseNumber(props.HS_STEVILKA, props.HS_DODATEK);
@@ -1228,16 +1174,16 @@
 
                 const entry = selectionHNMap.get(streetId);
                 const processed = entry?.set.has(hn) === true;
-                const conflict = !processed && hasConflict(hn, wx, wy, entry);
+                const conflict = !processed && hasConflict(hn, lon, lat, entry);
 
-                features.push(
-                  new OpenLayers.Feature.Vector(new OpenLayers.Geometry.Point(wx, wy), {
-                    number: hn,
-                    street: streetId,
-                    processed,
-                    conflict
-                  })
-                );
+                features.push({
+                  number: hn,
+                  street: streetId,
+                  processed,
+                  conflict,
+                  lon,
+                  lat
+                });
               }
 
               const allStreetIds = new Set();
@@ -1253,30 +1199,11 @@
               selectedNames.forEach(name => {
                 const sid = streets[name];
                 if (!sid) return;
-                const count = features.reduce((n,f)=> n + (f.attributes?.street === sid ? 1 : 0), 0);
+                const count = features.reduce((n,f)=> n + (f.street === sid ? 1 : 0), 0);
                 if (count > bestCount) { best = sid; bestCount = count; }
               });
-              const sdkFeatures = features.map((olFeat, i) => ({
-                type: 'Feature',
-                id: `qhnsl-${i}`,
-                geometry: {
-                  type: 'Point',
-                  coordinates: [olFeat.geometry.x, olFeat.geometry.y]
-                },
-                properties: {
-                  number: olFeat.attributes.number,
-                  street: olFeat.attributes.street,
-                  processed: olFeat.attributes.processed,
-                  conflict: olFeat.attributes.conflict,
-                  isSelectedStreet: false
-                }
-              }));
 
               currentStreetId = best || null;
-
-              sdkFeatures.forEach(f => {
-                f.properties.isSelectedStreet = f.properties.street === currentStreetId;
-              });
 
               if (!features.length) {
                 loading.style.display = 'none';
@@ -1296,11 +1223,9 @@
 
               if (lastSdkFeatureIds.length) {
                 wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_LAYER_NAME, featureIds: lastSdkFeatureIds });
+                lastSdkFeatureIds = [];
               }
-              wmeSDK.Map.addFeaturesToLayer({ layerName: SDK_LAYER_NAME, features: sdkFeatures });
-              lastSdkFeatureIds = sdkFeatures.map(f => f.id);
 
-              layer.removeAllFeatures();
               applyFeatureFilter();
               analyzeStreetMatches();
 
@@ -1323,7 +1248,10 @@
       // Visible HNs grouped by normalized street name (primary + alternate)
       async function getVisibleHNsByStreet() {
         const map = new Map();
-        const bounds = W.map.getExtent();
+        const ext = wmeSDK.Map.getMapExtent();
+        const [lonMin, latMin, lonMax, latMax] = Array.isArray(ext)
+          ? ext
+          : [ext.lonMin, ext.latMin, ext.lonMax, ext.latMax];
 
         const segIds = wmeSDK.DataModel.Segments.getAll()
           .filter(s => s.hasHouseNumbers)
@@ -1351,10 +1279,8 @@
             x = g.x;
             y = g.y;
           }
-          if (x == null || y == null || !bounds.containsLonLat({ lon: x, lat: y })) return;
+          if (x == null || y == null || x < lonMin || x > lonMax || y < latMin || y > latMax) return;
 
-          // Note: bounds check will reject all HNs until Phase 5 unifies the coordinate system.
-          // Faded "already in WME" coloring is a known regression for Phases 2–4.
           const numRaw = String(hn.number).trim();
 
           streetIdSet.forEach(streetId => {
