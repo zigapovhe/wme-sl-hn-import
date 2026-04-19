@@ -1291,6 +1291,36 @@
 
   (unsafeWindow || window).SDK_INITIALIZED.then(() => {
     wmeSDK = getWmeSdk({ scriptId: 'quick-hn-sl-importer', scriptName: 'Quick HN Importer (SI)' });
-    wmeSDK.Events.once({ eventName: 'wme-ready' }).then(init);
+    wmeSDK.Events.once({ eventName: 'wme-ready' }).then(() => {
+      const required = [
+        'DataModel.Segments.getById',
+        'DataModel.Streets.getStreet',
+        'DataModel.HouseNumbers.addHouseNumber',
+        'Editing.setSelection',
+        'Editing.getSelection',
+        'Map.addLayer',
+        'Map.addFeatureToLayer',
+        'Map.addFeaturesToLayer',
+        'Map.removeLayer',
+        'Map.removeFeatureFromLayer',
+        'Map.setLayerVisibility',
+        'Map.getZoomLevel',
+        'Map.getMapExtent',
+        'Map.getLonLatFromMapPixel',
+        'Map.getMapPixelFromLonLat'
+      ];
+      const missing = required.filter(path => {
+        const parts = path.split('.');
+        let cur = wmeSDK;
+        for (const p of parts) { cur = cur?.[p]; if (cur === undefined) return true; }
+        return false;
+      });
+      if (missing.length) {
+        console.error('[SL-HN] WME SDK missing required APIs:', missing);
+        toast(`SL-HN: WME SDK is missing ${missing.length} required APIs. See console.`, 'error');
+        return;
+      }
+      init();
+    });
   });
 })();
