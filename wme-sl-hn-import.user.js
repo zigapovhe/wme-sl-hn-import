@@ -409,9 +409,9 @@
       }
     }
 
-    W.map.events.register('zoomend', null, updateLayerVisibility);
-    W.map.events.register('moveend', null, updateLayerVisibility);
-    W.selectionManager.events.register('selectionchanged', null, onSelectionChanged);
+    wmeSDK.Events.on({ eventName: 'wme-map-zoom-changed', eventHandler: updateLayerVisibility });
+    wmeSDK.Events.on({ eventName: 'wme-map-move-end', eventHandler: updateLayerVisibility });
+    wmeSDK.Events.on({ eventName: 'wme-selection-changed', eventHandler: onSelectionChanged });
 
     // Get current WME street name from selection
     function getWmeStreetName() {
@@ -703,7 +703,7 @@
       onFeatureClick(bestFeature);
     }
 
-    W.map.events.register('click', null, handleMapClick);
+    wmeSDK.Events.on({ eventName: 'wme-map-mouse-click', eventHandler: handleMapClick });
 
     function onFeatureClick(feature) {
       const attrs = feature.attributes || {};
