@@ -369,36 +369,34 @@
       styleContext: {
         getFillColor: ({ feature }) => {
           const p = feature.properties;
-          if (p.processed) return '#888888';
-          if (p.conflict)  return '#ff3333';
-          if (p.isSelectedStreet) return '#22cc66';
-          return '#ff9933';
+          if (p.conflict) return '#ff6666';
+          return p.isSelectedStreet ? '#99ee99' : '#fb9c4f';
         },
-        getStrokeColor: ({ feature }) => {
+        getOpacity: ({ feature }) => {
           const p = feature.properties;
-          if (p.processed) return '#666666';
-          if (p.conflict)  return '#990000';
-          if (p.isSelectedStreet) return '#117733';
-          return '#cc6600';
+          if (p.conflict) return 1;
+          return (p.isSelectedStreet && p.processed) ? 0.3 : 1;
         },
-        getOpacity: ({ feature }) => feature.properties.processed ? 0.35 : 1.0,
+        getRadius: ({ feature }) => {
+          const num = feature.properties.number;
+          return num ? Math.max(String(num).length * 7, 12) : 12;
+        },
         getLabel: ({ feature }) => String(feature.properties.number ?? '')
       },
       styleRules: [{
         style: {
           graphicName: 'circle',
-          pointRadius: 7,
+          pointRadius: '${getRadius}',
           fillColor: '${getFillColor}',
           fillOpacity: '${getOpacity}',
-          strokeColor: '${getStrokeColor}',
+          strokeColor: '#ffffff',
           strokeWidth: 2,
-          strokeOpacity: 1,
+          strokeOpacity: '${getOpacity}',
           label: '${getLabel}',
-          fontColor: '#222222',
-          fontSize: '11px',
+          fontColor: '#111111',
           fontWeight: 'bold',
           labelOutlineColor: '#ffffff',
-          labelOutlineWidth: 2
+          labelOutlineWidth: 0
         }
       }]
     });
