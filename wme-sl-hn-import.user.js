@@ -172,6 +172,14 @@
     return hn.geometry || hn.attributes?.geometry || null;
   }
 
+  function getSelectedSegments() {
+    const sel = wmeSDK.Editing.getSelection();
+    if (!sel || sel.objectType !== 'segment') return [];
+    return sel.ids
+      .map(id => wmeSDK.DataModel.Segments.getById({ segmentId: id }))
+      .filter(Boolean);
+  }
+
   // Build house number string from components
   function buildHouseNumber(stevilka, dodatek) {
     let hn = String(stevilka || '').trim();
@@ -276,17 +284,17 @@
 
   // Update selected segment's street name via WME SDK
   function updateSegmentStreetName(newStreetName, onSuccess) {
-    const selection = W.selectionManager.getSegmentSelection();
-    if (!selection.segments || selection.segments.length === 0) {
+    const selectedSegments = getSelectedSegments();
+    if (selectedSegments.length === 0) {
       toast('No segment selected', 'warning');
       return;
     }
 
-    const segment = selection.segments[0];
-    const segmentId = segment.attributes.id;
+    const segment = selectedSegments[0];
+    const segmentId = segment.id;
 
     // Get current city from the segment
-    const currentStreetId = segment.attributes.primaryStreetID;
+    const currentStreetId = segment.primaryStreetId;
     const currentStreet = currentStreetId ? wmeSDK.DataModel.Streets.getById({ streetId: currentStreetId }) : null;
     const cityId = currentStreet?.cityId;
 
@@ -420,11 +428,11 @@
 
     // Get current WME street name from selection
     function getWmeStreetName() {
-      const selection = W.selectionManager.getSegmentSelection();
-      if (!selection.segments || selection.segments.length === 0) return null;
+      const selectedSegments = getSelectedSegments();
+      if (selectedSegments.length === 0) return null;
 
-      const seg = selection.segments[0];
-      const primaryStreetId = seg.attributes.primaryStreetID;
+      const seg = selectedSegments[0];
+      const primaryStreetId = seg.primaryStreetId;
       if (!primaryStreetId) return null;
 
       const street = wmeSDK.DataModel.Streets.getById({ streetId: primaryStreetId });
@@ -589,17 +597,17 @@
     function onSelectionChanged() {
       if (!lastFeatures.length) return;
 
-      const selection = W.selectionManager.getSegmentSelection();
-      if (!selection.segments || selection.segments.length === 0) {
+      const selectedSegments = getSelectedSegments();
+      if (selectedSegments.length === 0) {
         return;
       }
 
       const selectedStreetIds = new Set();
 
-      selection.segments.forEach(seg => {
-        const psid = seg.attributes.primaryStreetID;
+      selectedSegments.forEach(seg => {
+        const psid = seg.primaryStreetId;
         if (psid && psid > 0) selectedStreetIds.add(psid);
-        (seg.attributes.streetIDs || []).forEach(id => {
+        (seg.alternateStreetIds || []).forEach(id => {
           if (id && id > 0) selectedStreetIds.add(id);
         });
       });
@@ -735,7 +743,7 @@
         }
       }
 
-      W.selectionManager.setSelectedModels([nearestSegment]);
+      wmeSDK.Editing.setSelection({ selection: { ids: [nearestSegment.id], objectType: 'segment' } });
 
       try {
         const [lon, lat] = proj4('EPSG:3857', 'EPSG:4326', [feature.geometry.x, feature.geometry.y]);
@@ -1089,8 +1097,8 @@
 
       function updateLayer(statusDiv, loadId) {
         return new Promise((resolve) => {
-          const selection = W.selectionManager.getSegmentSelection();
-          if (!selection.segments || selection.segments.length === 0) {
+          const selectedSegments = getSelectedSegments();
+          if (selectedSegments.length === 0) {
             toast('Select a segment first.', 'warning');
             statusDiv.textContent = 'No segment selected.';
             resolve();
@@ -1100,7 +1108,7 @@
           loading.style.display = null;
 
           let bounds = null;
-          selection.segments.forEach(seg => {
+          selectedSegments.forEach(seg => {
             const g = getSegmentGeometry(seg);
             if (!g) return;
             const b = g.getBounds();
@@ -1191,9 +1199,9 @@
               }
 
               const allStreetIds = new Set();
-              selection.segments.forEach(seg => {
-                (seg.attributes.streetIDs || []).forEach(id => allStreetIds.add(id));
-                if (seg.attributes.primaryStreetID) allStreetIds.add(seg.attributes.primaryStreetID);
+              selectedSegments.forEach(seg => {
+                (seg.alternateStreetIds || []).forEach(id => allStreetIds.add(id));
+                if (seg.primaryStreetId) allStreetIds.add(seg.primaryStreetId);
               });
               const selectedNames = [...allStreetIds]
                 .map(id => wmeSDK.DataModel.Streets.getById({ streetId: id })?.name)
