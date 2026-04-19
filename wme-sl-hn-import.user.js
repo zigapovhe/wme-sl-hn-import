@@ -1299,7 +1299,6 @@
         'Editing.setSelection',
         'Editing.getSelection',
         'Map.addLayer',
-        'Map.addFeatureToLayer',
         'Map.addFeaturesToLayer',
         'Map.removeLayer',
         'Map.removeFeatureFromLayer',
@@ -1312,7 +1311,7 @@
       const missing = required.filter(path => {
         const parts = path.split('.');
         let cur = wmeSDK;
-        for (const p of parts) { cur = cur?.[p]; if (cur === undefined) return true; }
+        for (const p of parts) { cur = cur?.[p]; if (cur == null) return true; }
         return false;
       });
       if (missing.length) {
