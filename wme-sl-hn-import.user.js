@@ -718,6 +718,7 @@
           segmentId: nearestSegment.id
         });
 
+        feature.userAdded = true;
         feature.processed = true;
         feature.conflict = false;
         applyFeatureFilter();
@@ -994,7 +995,7 @@
           if (!hn || !streetId) return;
 
           const entry = selectionHNMap.get(streetId);
-          const processed = entry?.set.has(hn) === true;
+          const processed = (entry?.set.has(hn) === true) || feat.userAdded === true;
           const conflict = !processed && hasConflict(hn, eX, eY, entry);
 
           feat.processed = processed;
