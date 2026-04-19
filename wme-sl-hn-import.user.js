@@ -1188,6 +1188,24 @@
         });
 
         if (LS.getNavPoints()) scheduleRender();
+
+        const NAVPOINTS_TRIGGER_EVENTS = [
+          'wme-map-zoom-changed',
+          'wme-map-move-end',
+          'wme-house-number-added',
+          'wme-house-number-deleted',
+          'wme-house-number-moved',
+          'wme-house-number-updated',
+          'wme-map-data-loaded'
+        ];
+        NAVPOINTS_TRIGGER_EVENTS.forEach(eventName => {
+          wmeSDK.Events.on({
+            eventName,
+            eventHandler: () => {
+              if (LS.getNavPoints()) scheduleRender();
+            }
+          });
+        });
       }
 
       ['qhnsl-load', 'qhnsl-clear'].forEach(id => {
