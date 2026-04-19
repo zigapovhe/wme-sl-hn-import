@@ -287,7 +287,7 @@
 
     // Get current city from the segment
     const currentStreetId = segment.attributes.primaryStreetID;
-    const currentStreet = currentStreetId ? wmeSDK.DataModel.Streets.getStreet({ streetId: currentStreetId }) : null;
+    const currentStreet = currentStreetId ? wmeSDK.DataModel.Streets.getById({ streetId: currentStreetId }) : null;
     const cityId = currentStreet?.cityId;
 
     if (!cityId) {
@@ -427,7 +427,7 @@
       const primaryStreetId = seg.attributes.primaryStreetID;
       if (!primaryStreetId) return null;
 
-      const street = wmeSDK.DataModel.Streets.getStreet({ streetId: primaryStreetId });
+      const street = wmeSDK.DataModel.Streets.getById({ streetId: primaryStreetId });
       return street?.name || null;
     }
 
@@ -617,7 +617,7 @@
       }
 
       const selectedStreetNames = Array.from(selectedStreetIds)
-        .map(id => wmeSDK.DataModel.Streets.getStreet({ streetId: id })?.name)
+        .map(id => wmeSDK.DataModel.Streets.getById({ streetId: id })?.name)
         .filter(Boolean);
 
       let newStreetId = null;
@@ -727,7 +727,7 @@
           return;
         }
 
-        const nearestStreet = wmeSDK.DataModel.Streets.getStreet({ streetId: nearestSegment.primaryStreetId });
+        const nearestStreet = wmeSDK.DataModel.Streets.getById({ streetId: nearestSegment.primaryStreetId });
         const nearestStreetName = nearestStreet?.name || 'Unknown';
 
         if (!confirm(`Street name "${streetName}" could not be found.\n\nDo you want to add this number to "${nearestStreetName}"?`)) {
@@ -1196,7 +1196,7 @@
                 if (seg.attributes.primaryStreetID) allStreetIds.add(seg.attributes.primaryStreetID);
               });
               const selectedNames = [...allStreetIds]
-                .map(id => wmeSDK.DataModel.Streets.getStreet({ streetId: id })?.name)
+                .map(id => wmeSDK.DataModel.Streets.getById({ streetId: id })?.name)
                 .filter(Boolean);
 
               let best = null, bestCount = -1;
@@ -1282,7 +1282,7 @@
           const numRaw = String(hn.number).trim();
 
           streetIdSet.forEach(streetId => {
-            const st = wmeSDK.DataModel.Streets.getStreet({ streetId });
+            const st = wmeSDK.DataModel.Streets.getById({ streetId });
             const name = st?.name;
             if (!name) return;
 
