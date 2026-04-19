@@ -1065,10 +1065,10 @@
         layer.addFeatures(filtered);
       };
 
-      function recalculateFeatureStates() {
+      async function recalculateFeatureStates() {
         if (!lastFeatures.length) return;
 
-        const selectionHNMap = getVisibleHNsByStreet();
+        const selectionHNMap = await getVisibleHNsByStreet();
 
         lastFeatures.forEach(feature => {
           const { number: hn, street: streetId } = feature.attributes;
@@ -1101,8 +1101,7 @@
             eventName,
             eventHandler: () => {
               if (lastFeatures.length > 0) {
-                recalculateFeatureStates();
-                applyFeatureFilter();
+                recalculateFeatureStates().then(applyFeatureFilter);
               }
             }
           });
@@ -1112,8 +1111,7 @@
           eventName: 'wme-map-data-loaded',
           eventHandler: () => {
             if (lastFeatures.length > 0) {
-              recalculateFeatureStates();
-              applyFeatureFilter();
+              recalculateFeatureStates().then(applyFeatureFilter);
             }
           }
         });
