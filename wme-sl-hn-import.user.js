@@ -56,7 +56,9 @@
     getLayerVisible() { return localStorage.getItem('qhnsl-layer-visible') === '1'; },
     setLayerVisible(v){ localStorage.setItem('qhnsl-layer-visible', v ? '1' : '0'); },
     getSelectedOnly() { return localStorage.getItem('qhnsl-selected-only') === '1'; },
-    setSelectedOnly(v){ localStorage.setItem('qhnsl-selected-only', v ? '1' : '0'); }
+    setSelectedOnly(v){ localStorage.setItem('qhnsl-selected-only', v ? '1' : '0'); },
+    getNavPoints()    { return localStorage.getItem('qhnsl-navpoints') === '1'; },
+    setNavPoints(v)   { localStorage.setItem('qhnsl-navpoints', v ? '1' : '0'); }
   };
 
   const toast = (msg, type = 'info') => {
@@ -827,6 +829,7 @@
             <wz-checkbox id="hn-toggle">Show layer</wz-checkbox>
             <wz-checkbox id="qhnsl-missing">Show only missing</wz-checkbox>
             <wz-checkbox id="qhnsl-selected-only">Selected street only</wz-checkbox>
+            <wz-checkbox id="qhnsl-navpoints">Show HN NavPoints</wz-checkbox>
             <span style="font-size:12px;">Buffer (m): <input id="qhnsl-buffer" type="number" min="0" step="50" style="width:80px;margin-left:6px"></span>
           </div>
           <div id="hn-status" style="margin-top:10px;font-size:12px;color:#666;line-height:1.4;">
@@ -843,6 +846,7 @@
       const chkVis = tabPane.querySelector('#hn-toggle');
       chkMissing = tabPane.querySelector('#qhnsl-missing');
       chkSelectedOnly = tabPane.querySelector('#qhnsl-selected-only');
+      const chkNavPoints = tabPane.querySelector('#qhnsl-navpoints');
       const bufferEl   = tabPane.querySelector('#qhnsl-buffer');
       const statusDiv  = tabPane.querySelector('#hn-status');
 
@@ -862,6 +866,7 @@
       if (LS.getSelectedOnly()) {
         setChecked(chkSelectedOnly, true);
       }
+      setChecked(chkNavPoints, LS.getNavPoints());
 
       bufferEl.addEventListener('change', () => {
         const val = Number(bufferEl.value);
@@ -890,6 +895,12 @@
         setChecked(chkSelectedOnly, newState);
         LS.setSelectedOnly(newState);
         applyFeatureFilter();
+      });
+
+      chkNavPoints.addEventListener('click', () => {
+        const newState = !isChecked(chkNavPoints);
+        setChecked(chkNavPoints, newState);
+        LS.setNavPoints(newState);
       });
 
       async function loadSelectedStreet() {
