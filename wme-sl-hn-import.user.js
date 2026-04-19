@@ -381,16 +381,20 @@
           if (p.isSelectedStreet) return '#117733';
           return '#cc6600';
         },
-        getOpacity: ({ feature }) => feature.properties.processed ? 0.35 : 1.0
+        getOpacity: ({ feature }) => feature.properties.processed ? 0.35 : 1.0,
+        getLabel: ({ feature }) => String(feature.properties.number ?? '')
       },
       styleRules: [{
         style: {
+          graphicName: 'circle',
+          pointRadius: 7,
           fillColor: '${getFillColor}',
+          fillOpacity: '${getOpacity}',
           strokeColor: '${getStrokeColor}',
           strokeWidth: 2,
-          pointRadius: 7,
-          fillOpacity: '${getOpacity}',
-          label: '${number}',
+          strokeOpacity: 1,
+          label: '${getLabel}',
+          fontColor: '#222222',
           fontSize: '11px',
           fontWeight: 'bold',
           labelOutlineColor: '#ffffff',
