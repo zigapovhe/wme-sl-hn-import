@@ -98,7 +98,7 @@
     let normalized = String(name).toLowerCase().trim();
 
     for (const [abbrev, full] of Object.entries(ABBREVIATIONS)) {
-      const escapedAbbrev = abbrev.replace('.', '\\.');
+      const escapedAbbrev = abbrev.replace(/\./g, '\\.');
       const regex = new RegExp('(^|\\s)' + escapedAbbrev + '(?=\\s|$)', 'gi');
       normalized = normalized.replace(regex, '$1' + full);
     }
@@ -214,6 +214,7 @@
         GM_xmlhttpRequest({
           method: 'GET',
           url: url,
+          timeout: 30000,
           onload: function (response) {
             try {
               const data = JSON.parse(response.responseText);
@@ -243,6 +244,9 @@
           },
           onerror: function (err) {
             reject(err);
+          },
+          ontimeout: function () {
+            reject(new Error('EProstor request timed out after 30s'));
           }
         });
       }
@@ -328,6 +332,7 @@
     let streets = {};
     let lastFeatures = [];
     let isLoading = false;
+    let currentLoadId = 0;
     let userWantsLayerVisible = false;
     let streetNameSpan = null;
     let currentStreetDiv = null;
@@ -930,6 +935,7 @@
       async function loadSelectedStreet() {
         if (isLoading) return;
         isLoading = true;
+        const myLoadId = ++currentLoadId;
         btnLoad.disabled = true;
         btnLoadLabel.textContent = 'Loading…';
 
@@ -940,11 +946,15 @@
         lastFeatures = [];
         streetAnalysisDiv.style.display = 'none';
 
-        await updateLayer(statusDiv).catch(() => {});
-        userWantsLayerVisible = true;
-        setChecked(chkVis, true);
-        LS.setLayerVisible(true);
-        updateLayerVisibility();
+        await updateLayer(statusDiv, myLoadId).catch(err => console.warn('SL-HN updateLayer:', err));
+
+        // Skip post-load side effects if user clicked Clear (or another Load) mid-fetch
+        if (myLoadId === currentLoadId) {
+          userWantsLayerVisible = true;
+          setChecked(chkVis, true);
+          LS.setLayerVisible(true);
+          updateLayerVisibility();
+        }
 
         btnLoad.disabled = false;
         btnLoadLabel.textContent = 'Load selected street';
@@ -954,6 +964,7 @@
       btnLoad.addEventListener('click', loadSelectedStreet);
 
       function clearLayer() {
+        currentLoadId++; // invalidate any in-flight load so its results are discarded
         layer.removeAllFeatures();
         userWantsLayerVisible = false;
         layer.setVisibility(false);
@@ -1071,7 +1082,7 @@
         catch (e) { console.warn('SL-HN: failed to register shortcut', spec.shortcutId, e); }
       });
 
-      function updateLayer(statusDiv) {
+      function updateLayer(statusDiv, loadId) {
         return new Promise((resolve) => {
           const selection = W.selectionManager.getSegmentSelection();
           if (!selection.segments || selection.segments.length === 0) {
@@ -1124,6 +1135,13 @@
 
           fetchAddresses(minE, minN, maxE, maxN)
             .then(apiFeatures => {
+              // Bail out if user clicked Clear (or started a newer load) while the fetch was in flight
+              if (loadId !== currentLoadId) {
+                loading.style.display = 'none';
+                resolve();
+                return;
+              }
+
               const features = [];
 
               for (const item of apiFeatures) {
@@ -1211,8 +1229,10 @@
             .catch(err => {
               console.error('[Quick HN Importer] API error:', err);
               loading.style.display = 'none';
-              statusDiv.textContent = 'Error fetching address data. See console.';
-              toast('Error fetching address data.', 'error');
+              if (loadId === currentLoadId) {
+                statusDiv.textContent = 'Error fetching address data. See console.';
+                toast('Error fetching address data.', 'error');
+              }
               resolve();
             });
         });
