@@ -37,6 +37,19 @@ No manual typing is needed — just click.
 - Show only the selected street  
 - Adjust the buffer distance (default: 500 m)
 
+## 📍 HN NavPoints Overlay
+
+Optional passive overlay showing every loaded Waze house number as a dashed line from its map pin to its anchor point on the segment, plus the number as a colored label. Color indicates edit state:
+
+- Yellow — untouched default
+- White — touched
+- Red — untouched + forced
+- Orange — touched + forced
+
+Toggle via the "Show HN NavPoints" checkbox. Visible at zoom level 18 and above.
+
+---
+
 ### ⌨️ Keyboard Shortcuts
 
 | Shortcut | Action |
