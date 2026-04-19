@@ -990,12 +990,12 @@
         const selectionHNMap = await getVisibleHNsByStreet();
 
         lastFeatures.forEach(feat => {
-          const { number: hn, street: streetId, lon, lat } = feat;
+          const { number: hn, street: streetId, eX, eY } = feat;
           if (!hn || !streetId) return;
 
           const entry = selectionHNMap.get(streetId);
           const processed = entry?.set.has(hn) === true;
-          const conflict = !processed && hasConflict(hn, lon, lat, entry);
+          const conflict = !processed && hasConflict(hn, eX, eY, entry);
 
           feat.processed = processed;
           feat.conflict = conflict;
@@ -1144,7 +1144,7 @@
 
                 const entry = selectionHNMap.get(streetId);
                 const processed = entry?.set.has(hn) === true;
-                const conflict = !processed && hasConflict(hn, lon, lat, entry);
+                const conflict = !processed && hasConflict(hn, e, n, entry);
 
                 features.push({
                   number: hn,
@@ -1152,7 +1152,9 @@
                   processed,
                   conflict,
                   lon,
-                  lat
+                  lat,
+                  eX: e,
+                  eY: n
                 });
               }
 
@@ -1251,6 +1253,7 @@
           }
           if (x == null || y == null || x < lonMin || x > lonMax || y < latMin || y > latMax) return;
 
+          const [eX, eY] = proj4('EPSG:4326', 'EPSG:3794', [x, y]);
           const numRaw = String(hn.number).trim();
 
           streetIdSet.forEach(streetId => {
@@ -1267,7 +1270,7 @@
             }
 
             entry.set.add(numRaw);
-            entry.items.push({ num: numRaw, x, y });
+            entry.items.push({ num: numRaw, x: eX, y: eY });
           });
         });
 
