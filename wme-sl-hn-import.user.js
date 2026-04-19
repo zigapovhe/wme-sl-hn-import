@@ -898,12 +898,6 @@
         applyFeatureFilter();
       });
 
-      chkNavPoints.addEventListener('click', () => {
-        const newState = !isChecked(chkNavPoints);
-        setChecked(chkNavPoints, newState);
-        LS.setNavPoints(newState);
-      });
-
       async function loadSelectedStreet() {
         if (isLoading) return;
         isLoading = true;
@@ -1099,6 +1093,101 @@
             }
           ]
         });
+
+        function clearLayer() {
+          if (!lastNavIds.length) return;
+          try {
+            wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_NAVPOINTS_LAYER_NAME, featureIds: lastNavIds });
+          } catch (e) {
+            console.debug('[SL-HN] NavPoints clearLayer:', e);
+          }
+          lastNavIds = [];
+        }
+
+        async function renderNavPoints() {
+          if (!LS.getNavPoints()) { clearLayer(); return; }
+
+          const myRenderId = ++currentRenderId;
+
+          const segIds = wmeSDK.DataModel.Segments.getAll()
+            .filter(s => s.hasHouseNumbers)
+            .map(s => s.id);
+
+          if (!segIds.length) { clearLayer(); return; }
+
+          let allHns;
+          try {
+            allHns = await wmeSDK.DataModel.HouseNumbers.fetchHouseNumbers({ segmentIds: segIds });
+          } catch (err) {
+            console.warn('[SL-HN] NavPoints fetch failed:', err);
+            return;
+          }
+
+          if (myRenderId !== currentRenderId) return;
+
+          const features = [];
+          for (const hn of allHns) {
+            const touched = hn.updatedBy != null;
+            const forced = hn.isForced === true;
+            if (hn.fractionPoint?.coordinates && hn.geometry?.coordinates) {
+              features.push({
+                type: 'Feature',
+                id: `navp-${hn.id}-line`,
+                geometry: {
+                  type: 'LineString',
+                  coordinates: [hn.fractionPoint.coordinates, hn.geometry.coordinates]
+                },
+                properties: { kind: 'line', touched, forced }
+              });
+            }
+            if (hn.geometry?.coordinates) {
+              features.push({
+                type: 'Feature',
+                id: `navp-${hn.id}-label`,
+                geometry: hn.geometry,
+                properties: { kind: 'label', number: hn.number, touched, forced }
+              });
+            }
+          }
+
+          if (lastNavIds.length) {
+            try {
+              wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_NAVPOINTS_LAYER_NAME, featureIds: lastNavIds });
+            } catch (e) {
+              console.debug('[SL-HN] NavPoints swap-clear:', e);
+            }
+          }
+
+          if (features.length) {
+            try {
+              wmeSDK.Map.addFeaturesToLayer({ layerName: SDK_NAVPOINTS_LAYER_NAME, features });
+            } catch (e) {
+              console.warn('[SL-HN] NavPoints addFeaturesToLayer:', e);
+              lastNavIds = [];
+              return;
+            }
+          }
+
+          lastNavIds = features.map(f => f.id);
+        }
+
+        function scheduleRender() {
+          if (renderTimer) clearTimeout(renderTimer);
+          renderTimer = setTimeout(() => {
+            renderTimer = null;
+            renderNavPoints().catch(err => console.warn('[SL-HN] NavPoints render failed:', err));
+          }, 300);
+        }
+
+        chkNavPoints.addEventListener('click', () => {
+          const on = !isChecked(chkNavPoints);
+          setChecked(chkNavPoints, on);
+          LS.setNavPoints(on);
+          if (on) scheduleRender();
+          else clearLayer();
+        });
+
+        if (LS.getNavPoints()) scheduleRender();
       }
 
       ['qhnsl-load', 'qhnsl-clear'].forEach(id => {
