@@ -283,7 +283,7 @@
     // Get current city from the segment
     const currentStreetId = segment.attributes.primaryStreetID;
     const currentStreet = currentStreetId ? wmeSDK.DataModel.Streets.getStreet({ streetId: currentStreetId }) : null;
-    const cityId = currentStreet?.cityID;
+    const cityId = currentStreet?.cityId;
 
     if (!cityId) {
       toast('Segment has no city assigned', 'warning');
