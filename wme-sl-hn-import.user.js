@@ -303,14 +303,14 @@
 
       // If not found, create the street
       if (!street) {
-        console.log('[SL-HN] Street not found, creating new street:', newStreetName);
+        console.debug('[SL-HN] Street not found, creating new street:', newStreetName);
         street = wmeSDK.DataModel.Streets.addStreet({
           streetName: newStreetName,
           cityId: cityId
         });
       }
 
-      console.log('[SL-HN] Got street:', street);
+      console.debug('[SL-HN] Got street:', street);
 
       // Now update the segment with the new street ID
       wmeSDK.DataModel.Segments.updateAddress({
@@ -318,7 +318,7 @@
         primaryStreetId: street.id
       });
 
-      console.log('[SL-HN] Updated segment', segmentId, 'to street ID:', street.id);
+      console.debug('[SL-HN] Updated segment', segmentId, 'to street ID:', street.id);
       toast(`Updated street to "${newStreetName}"`, 'success');
 
       if (typeof onSuccess === 'function') {
@@ -1454,6 +1454,8 @@
         'DataModel.Streets.getStreet',
         'DataModel.HouseNumbers.fetchHouseNumbers',
         'DataModel.HouseNumbers.addHouseNumber',
+        'DataModel.Segments.updateAddress',
+        'DataModel.Streets.addStreet',
         'Editing.setSelection',
         'Editing.getSelection',
         'Map.addLayer',
@@ -1462,7 +1464,6 @@
         'Map.setLayerVisibility',
         'Map.getZoomLevel',
         'Map.getMapExtent',
-        'Map.getLonLatFromMapPixel',
         'Map.getMapPixelFromLonLat'
       ];
       const missing = required.filter(path => {
