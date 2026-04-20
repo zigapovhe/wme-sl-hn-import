@@ -819,8 +819,8 @@
         <div id="qhnsl-pane" style="padding:10px;">
           <h2 style="margin-top:0;">Quick HN Importer 🇸🇮</h2>
           <div style="display:flex;gap:6px;flex-wrap:wrap;margin:4px 0 8px 0;">
-            <button id="hn-load" class="wz-button"><span id="hn-load-label">Load selected street</span> <kbd style="font-size:10px;background:#e0e0e0;border:1px solid #aaa;border-radius:3px;padding:1px 4px;">Alt+Shift+L</kbd></button>
-            <button id="hn-clear" class="wz-button wz-button--secondary">Clear <kbd style="font-size:10px;background:#e0e0e0;border:1px solid #aaa;border-radius:3px;padding:1px 4px;">Alt+Shift+K</kbd></button>
+            <button id="hn-load" class="wz-button"><span id="hn-load-label">Load selected street</span> <kbd style="margin-left:6px;font-size:10px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:rgba(0,0,0,0.08);border-radius:3px;padding:2px 5px;color:#555;">Alt+Shift+L</kbd></button>
+            <button id="hn-clear" class="wz-button wz-button--secondary">Clear <kbd style="margin-left:6px;font-size:10px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:rgba(0,0,0,0.08);border-radius:3px;padding:2px 5px;color:#555;">Alt+Shift+K</kbd></button>
           </div>
           <div id="hn-current-street" style="margin:8px 0;padding:8px;background:#f0f0f0;border-radius:4px;font-size:13px;display:none;">
             <b>WME selected street:</b> <span id="hn-street-name" style="color:#2a7;font-weight:bold;">—</span>
