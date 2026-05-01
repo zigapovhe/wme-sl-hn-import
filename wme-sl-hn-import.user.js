@@ -15,6 +15,7 @@
 // @exclude      https://www.waze.com/user/editor*
 // @connect      ipi.eprostor.gov.si
 // @connect      raw.githubusercontent.com
+// @connect      wme-hn-analytics.*.workers.dev
 // @require      https://cdnjs.cloudflare.com/ajax/libs/proj4js/2.9.0/proj4.js
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setClipboard
@@ -42,6 +43,9 @@
   // EProstor API configuration
   const EPROSTOR_API = 'https://ipi.eprostor.gov.si/wfs-si-gurs-rn/ogc/features/collections/SI.GURS.RN:REGISTER_NASLOVOV/items';
   const EPROSTOR_LIMIT = 1000;
+
+  // Analytics — anonymous house number count tracking
+  const ANALYTICS_URL = 'https://wme-hn-analytics.YOURUSERNAME.workers.dev/track';
 
   // Common Slovenian street name abbreviations
   const ABBREVIATIONS = {
@@ -679,6 +683,39 @@
 
     wmeSDK.Events.on({ eventName: 'wme-map-mouse-click', eventHandler: handleMapClick });
 
+    function getEditorCountryCode() {
+      try {
+        const W = (unsafeWindow || window).W;
+        const country = W?.model?.getTopCountry?.();
+        if (country?.abbr) {
+          const code = country.abbr.toUpperCase();
+          console.debug('[SL-HN] Analytics: detected country code:', code);
+          return code;
+        }
+        console.debug('[SL-HN] Analytics: getTopCountry() returned no abbr, falling back to SI');
+      } catch (err) {
+        console.debug('[SL-HN] Analytics: failed to detect country code, falling back to SI', err);
+      }
+      return 'SI';
+    }
+
+    function trackHouseNumberAdded() {
+      const country = getEditorCountryCode();
+      console.debug('[SL-HN] Analytics: sending track event for country', country, 'to', ANALYTICS_URL);
+      try {
+        GM_xmlhttpRequest({
+          method: 'POST',
+          url: ANALYTICS_URL,
+          headers: { 'Content-Type': 'application/json' },
+          data: JSON.stringify({ country }),
+          anonymous: true,
+          timeout: 5000,
+          onload: (res) => console.debug('[SL-HN] Analytics: track response', res.status, res.responseText),
+          onerror: (err) => console.debug('[SL-HN] Analytics: track request failed', err)
+        });
+      } catch (_) { /* fire-and-forget */ }
+    }
+
     function onFeatureClick(feature) {
       if (feature.processed) return;
 
@@ -716,6 +753,8 @@
         feature.processed = true;
         feature.conflict = false;
         applyFeatureFilter();
+
+        trackHouseNumberAdded();
 
         console.log('[SL-HN] Added house number', houseNumber);
         toast(`Added house number ${houseNumber}`, 'success');
