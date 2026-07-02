@@ -346,6 +346,7 @@
     let streetNames = {};
     let streets = {};
     let lastFeatures = [];
+    let fixStreetHighlightStreetId = null; // official street ID whose HNs are highlighted during fix-street flow
     let lastSdkFeatureIds = [];
     let isLoading = false;
     let currentLoadId = 0;
@@ -380,12 +381,13 @@
       styleContext: {
         getFillColor: ({ feature }) => {
           const p = feature.properties;
+          if (p.fixHighlight) return '#4da6ff';
           if (p.conflict) return '#ff6666';
           return p.isSelectedStreet ? '#99ee99' : '#fb9c4f';
         },
         getOpacity: ({ feature }) => {
           const p = feature.properties;
-          if (p.conflict) return 1;
+          if (p.fixHighlight || p.conflict) return 1;
           return (p.isSelectedStreet && p.processed) ? 0.3 : 1;
         },
         getRadius: ({ feature }) => {
@@ -1001,7 +1003,8 @@
             street: feat.street,
             processed: feat.processed,
             conflict: feat.conflict,
-            isSelectedStreet: feat.street === currentStreetId
+            isSelectedStreet: feat.street === currentStreetId,
+            fixHighlight: fixStreetHighlightStreetId != null && feat.street === fixStreetHighlightStreetId
           }
         }));
         wmeSDK.Map.addFeaturesToLayer({ layerName: SDK_LAYER_NAME, features: visibleSdk });
