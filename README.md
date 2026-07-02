@@ -86,7 +86,35 @@ When you load addresses, the script analyzes official street names from EProstor
 ### Features
 - **Fuzzy matching**: Detects typos, missing diacritics (e.g., "Šmartinska" vs "Smartinska"), and common abbreviations (c. → cesta, ul. → ulica)
 - **Copy to clipboard**: Click 📋 to copy any official street name
-- **Fix-street assist**: when a house number's official street name has no matching WME segment, the script highlights all affected house numbers, pre-selects the wrongly named segments, and offers a one-click rename — no more guessing from a browser popup.
+
+---
+
+## 🆕 Fix-Street Assist (v2.3.0)
+
+Previously, clicking a house number whose official street didn't exist in WME popped up a browser dialog offering to attach it to the nearest segment — usually the one carrying the *wrong* name. Now the script helps you fix the street instead:
+
+### How it works
+
+Click a house number whose official street name is missing from WME (or exists only suspiciously far away — more than 50 m and twice as far as the nearest segment):
+
+1. 🔵 All house numbers belonging to that official street are **highlighted blue** on the map
+2. The segments that probably carry the wrong or missing name are **pre-selected** in WME — adjust the selection with shift-click if the guess is off
+3. A floating dialog shows the official name and offers:
+
+| Button | Action |
+|--------|--------|
+| ✓ Rename selected segments | Renames whatever is selected to the official name, then adds the clicked house number — circles turn 🟢 green immediately, no save needed |
+| 📋 Copy name | Copies the official street name to the clipboard |
+| Add to "…" anyway | Attaches the house number without renaming anything (e.g. long driveways where the distant named road really is the right target) |
+| ✕ Cancel | Closes the dialog, changes nothing |
+
+### Also in v2.3.0
+
+- Renaming a street now applies to **all** selected segments (previously only the first)
+- House numbers are never attached to pedestrian paths, boardwalks, stairways, railroads, or runways
+- Circles hidden by the filters or by zooming out are no longer clickable
+- Unsaved adds/deletes are tracked more reliably and reconciled when you save
+
 ---
 
 ## ⚠️ Notes & Gotchas
