@@ -273,6 +273,54 @@
     }
   }
 
+  // ---- Fix-street floating dialog (shown when an official street name has no WME match) ----
+  let fixStreetDialogEl = null;
+
+  function closeFixStreetDialog() {
+    if (fixStreetDialogEl) {
+      fixStreetDialogEl.remove();
+      fixStreetDialogEl = null;
+    }
+  }
+
+  function showFixStreetDialog({ officialName, hnCount, segmentCount, nearestStreetName, onRename, onAddAnyway, onCancel }) {
+    closeFixStreetDialog();
+
+    const addAnywayLabel = nearestStreetName
+      ? `Add to "${escapeHtml(nearestStreetName)}" anyway`
+      : 'Add to unnamed segment anyway';
+
+    const primaryBtnStyle = 'font-size:12px;padding:4px 10px;cursor:pointer;border:1px solid #28a745;border-radius:3px;background:#d4edda;color:#155724;font-weight:bold;';
+    const plainBtnStyle = 'font-size:12px;padding:4px 10px;cursor:pointer;border:1px solid #ccc;border-radius:3px;background:#f8f8f8;color:#333;';
+
+    const div = document.createElement('div');
+    div.id = 'qhnsl-fix-street-dialog';
+    div.style.cssText = 'position:fixed;top:70px;left:50%;transform:translateX(-50%);z-index:10000;'
+      + 'background:#fff;border:1px solid #ffc107;border-radius:6px;box-shadow:0 2px 12px rgba(0,0,0,0.35);'
+      + 'padding:12px 16px;font-size:13px;max-width:440px;font-family:inherit;';
+    div.innerHTML = `
+      <div style="margin-bottom:6px;">⚠️ Official street <b>"${escapeHtml(officialName)}"</b> not found in WME</div>
+      <div style="font-size:12px;color:#555;margin-bottom:10px;">
+        ${hnCount} house number${hnCount === 1 ? '' : 's'} belong${hnCount === 1 ? 's' : ''} to it (highlighted blue) •
+        ${segmentCount} segment${segmentCount === 1 ? '' : 's'} selected<br/>
+        Adjust the segment selection on the map if needed, then rename.
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;">
+        <button class="fix-rename-btn" style="${primaryBtnStyle}">✓ Rename selected segments</button>
+        <button class="fix-copy-btn" style="${plainBtnStyle}">📋 Copy name</button>
+        <button class="fix-add-anyway-btn" style="${plainBtnStyle}">${addAnywayLabel}</button>
+        <button class="fix-cancel-btn" style="${plainBtnStyle}">✕ Cancel</button>
+      </div>`;
+
+    div.querySelector('.fix-rename-btn').addEventListener('click', onRename);
+    div.querySelector('.fix-copy-btn').addEventListener('click', () => copyToClipboard(officialName));
+    div.querySelector('.fix-add-anyway-btn').addEventListener('click', onAddAnyway);
+    div.querySelector('.fix-cancel-btn').addEventListener('click', onCancel);
+
+    document.body.appendChild(div);
+    fixStreetDialogEl = div;
+  }
+
   // Rename all currently selected segments to the given street name via WME SDK.
   // Returns the number of segments successfully renamed.
   function updateSegmentStreetName(newStreetName, onSuccess) {
