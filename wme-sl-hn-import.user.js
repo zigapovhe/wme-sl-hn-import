@@ -273,61 +273,72 @@
     }
   }
 
-  // Update selected segment's street name via WME SDK
+  // Rename all currently selected segments to the given street name via WME SDK.
+  // Returns the number of segments successfully renamed.
   function updateSegmentStreetName(newStreetName, onSuccess) {
     const selectedSegments = getSelectedSegments();
     if (selectedSegments.length === 0) {
       toast('No segment selected', 'warning');
-      return;
+      return 0;
     }
 
-    const segment = selectedSegments[0];
-    const segmentId = segment.id;
+    let renamed = 0;
+    let failed = 0;
 
-    // Get current city from the segment
-    const currentStreetId = segment.primaryStreetId;
-    const currentStreet = currentStreetId ? wmeSDK.DataModel.Streets.getById({ streetId: currentStreetId }) : null;
-    const cityId = currentStreet?.cityId;
+    selectedSegments.forEach(segment => {
+      try {
+        // Resolve the city from the segment's current primary street
+        const currentStreet = segment.primaryStreetId
+          ? wmeSDK.DataModel.Streets.getById({ streetId: segment.primaryStreetId })
+          : null;
+        const cityId = currentStreet?.cityId;
 
-    if (!cityId) {
-      toast('Segment has no city assigned', 'warning');
-      return;
-    }
+        if (!cityId) {
+          console.warn('[SL-HN] Segment has no resolvable city, skipping:', segment.id);
+          failed++;
+          return;
+        }
 
-    try {
-      // First, try to get existing street with this name in this city
-      let street = wmeSDK.DataModel.Streets.getStreet({
-        cityId: cityId,
-        streetName: newStreetName
-      });
-
-      // If not found, create the street
-      if (!street) {
-        console.debug('[SL-HN] Street not found, creating new street:', newStreetName);
-        street = wmeSDK.DataModel.Streets.addStreet({
-          streetName: newStreetName,
-          cityId: cityId
+        // Get existing street with this name in this city, or create it
+        let street = wmeSDK.DataModel.Streets.getStreet({
+          cityId: cityId,
+          streetName: newStreetName
         });
+        if (!street) {
+          console.debug('[SL-HN] Street not found, creating new street:', newStreetName);
+          street = wmeSDK.DataModel.Streets.addStreet({
+            streetName: newStreetName,
+            cityId: cityId
+          });
+        }
+
+        wmeSDK.DataModel.Segments.updateAddress({
+          segmentId: segment.id,
+          primaryStreetId: street.id
+        });
+        console.debug('[SL-HN] Updated segment', segment.id, 'to street ID:', street.id);
+        renamed++;
+      } catch (err) {
+        console.error('[SL-HN] Error renaming segment', segment.id, err);
+        failed++;
       }
+    });
 
-      console.debug('[SL-HN] Got street:', street);
-
-      // Now update the segment with the new street ID
-      wmeSDK.DataModel.Segments.updateAddress({
-        segmentId: segmentId,
-        primaryStreetId: street.id
-      });
-
-      console.debug('[SL-HN] Updated segment', segmentId, 'to street ID:', street.id);
-      toast(`Updated street to "${newStreetName}"`, 'success');
-
-      if (typeof onSuccess === 'function') {
-        onSuccess();
-      }
-    } catch (err) {
-      console.error('[SL-HN] Error updating street name:', err);
-      toast('Error updating street name. See console.', 'error');
+    if (renamed === 0) {
+      toast('Could not rename any segment. See console.', 'error');
+      return 0;
     }
+
+    if (failed > 0) {
+      toast(`Renamed ${renamed} of ${renamed + failed} segments to "${newStreetName}"`, 'warning');
+    } else {
+      toast(`Updated street to "${newStreetName}"`, 'success');
+    }
+
+    if (typeof onSuccess === 'function') {
+      onSuccess();
+    }
+    return renamed;
   }
 
   function init() {
