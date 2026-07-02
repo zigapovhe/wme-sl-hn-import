@@ -39,6 +39,11 @@
   const MAX_CLICK_DISTANCE_PX = 25;
   const MAX_HN_CONFLICT_DISTANCE = 10;
 
+  // Waze road types house numbers should never attach to:
+  // 5 walking trail / routable pedestrian path, 10 pedestrian boardwalk,
+  // 16 stairway, 18 railroad, 19 runway/taxiway
+  const NON_ADDRESSABLE_ROAD_TYPES = new Set([5, 10, 16, 18, 19]);
+
   // EProstor API configuration
   const EPROSTOR_API = 'https://ipi.eprostor.gov.si/wfs-si-gurs-rn/ogc/features/collections/SI.GURS.RN:REGISTER_NASLOVOV/items';
   const EPROSTOR_LIMIT = 1000;
@@ -884,7 +889,8 @@
 
     function findNearestSegment(feature, streetName, matchName) {
       const point = { x: feature.lon, y: feature.lat };
-      const allSegments = wmeSDK.DataModel.Segments.getAll();
+      const allSegments = wmeSDK.DataModel.Segments.getAll()
+        .filter(segment => !NON_ADDRESSABLE_ROAD_TYPES.has(segment.roadType));
       let candidateSegments = allSegments;
 
       if (matchName) {
