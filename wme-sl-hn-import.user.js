@@ -728,8 +728,20 @@
     }
 
 
+    // Single source of truth for which loaded HNs are currently drawn on the map.
+    // Used by both the layer redraw and the click hit-test so that circles hidden
+    // by the checkbox filters are never clickable.
+    function isFeatureVisible(feat) {
+      if (chkMissing?.hasAttribute('checked') && feat.processed) return false;
+      if (chkSelectedOnly?.hasAttribute('checked') && currentStreetId
+          && feat.street !== currentStreetId && feat.street !== fixStreetHighlightStreetId) return false;
+      return true;
+    }
+
     function handleMapClick(evt) {
-      if (!userWantsLayerVisible || !lastFeatures.length) return;
+      // lastComputedVisibility is false when the layer is hidden (e.g. zoom < 18):
+      // no visible circles means clicks must do nothing.
+      if (!userWantsLayerVisible || !lastComputedVisibility || !lastFeatures.length) return;
       if (evt == null || evt.x == null || evt.y == null) return;
 
       const MAX_PIXELS_SQ = MAX_CLICK_DISTANCE_PX * MAX_CLICK_DISTANCE_PX;
@@ -738,6 +750,7 @@
 
       for (const f of lastFeatures) {
         if (f.lon == null || f.lat == null) continue;
+        if (!isFeatureVisible(f)) continue;
         const fPx = wmeSDK.Map.getMapPixelFromLonLat({ lonLat: { lon: f.lon, lat: f.lat } });
         if (!fPx) continue;
         const dx = fPx.x - evt.x;
@@ -1104,7 +1117,7 @@
           lastSdkFeatureIds = [];
         }
         userWantsLayerVisible = false;
-        wmeSDK.Map.setLayerVisibility({ layerName: SDK_LAYER_NAME, visibility: false });
+        updateLayerVisibility(); // keeps lastComputedVisibility in sync (a direct setLayerVisibility here left it stale)
         setChecked(chkVis, false);
         LS.setLayerVisible(false);
         streets = {};
@@ -1121,13 +1134,7 @@
       btnClear.addEventListener('click', clearLayer);
 
       applyFeatureFilter = function () {
-        const onlyMissing  = chkMissing?.hasAttribute('checked');
-        const selectedOnly = chkSelectedOnly?.hasAttribute('checked');
-        const visible = lastFeatures.filter(feat => {
-          if (onlyMissing && feat.processed) return false;
-          if (selectedOnly && currentStreetId && feat.street !== currentStreetId && feat.street !== fixStreetHighlightStreetId) return false;
-          return true;
-        });
+        const visible = lastFeatures.filter(isFeatureVisible);
         if (lastSdkFeatureIds.length) {
           wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_LAYER_NAME, featureIds: lastSdkFeatureIds });
         }
