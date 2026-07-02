@@ -86,6 +86,7 @@ When you load addresses, the script analyzes official street names from EProstor
 ### Features
 - **Fuzzy matching**: Detects typos, missing diacritics (e.g., "Šmartinska" vs "Smartinska"), and common abbreviations (c. → cesta, ul. → ulica)
 - **Copy to clipboard**: Click 📋 to copy any official street name
+- **Fix-street assist**: when a house number's official street name has no matching WME segment, the script highlights all affected house numbers, pre-selects the wrongly named segments, and offers a one-click rename — no more guessing from a browser popup.
 ---
 
 ## ⚠️ Notes & Gotchas

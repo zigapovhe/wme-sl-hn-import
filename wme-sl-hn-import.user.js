@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WME Quick HN Importer - Slovenia
 // @namespace    https://github.com/zigapovhe/wme-sl-hn-import
-// @version      2.2.0
+// @version      2.3.0
 // @description  Quickly add Slovenian house numbers with clickable overlays
 // @author       ThatByte
 // @downloadURL  https://raw.githubusercontent.com/zigapovhe/wme-sl-hn-import/main/wme-sl-hn-import.user.js
@@ -38,6 +38,11 @@
 
   const MAX_CLICK_DISTANCE_PX = 25;
   const MAX_HN_CONFLICT_DISTANCE = 10;
+
+  // Waze road types house numbers should never attach to:
+  // 5 walking trail / routable pedestrian path, 10 pedestrian boardwalk,
+  // 16 stairway, 18 railroad, 19 runway/taxiway
+  const NON_ADDRESSABLE_ROAD_TYPES = new Set([5, 10, 16, 18, 19]);
 
   // EProstor API configuration
   const EPROSTOR_API = 'https://ipi.eprostor.gov.si/wfs-si-gurs-rn/ogc/features/collections/SI.GURS.RN:REGISTER_NASLOVOV/items';
@@ -273,61 +278,120 @@
     }
   }
 
-  // Update selected segment's street name via WME SDK
+  // ---- Fix-street floating dialog (shown when an official street name has no WME match) ----
+  let fixStreetDialogEl = null;
+
+  function closeFixStreetDialog() {
+    if (fixStreetDialogEl) {
+      fixStreetDialogEl.remove();
+      fixStreetDialogEl = null;
+    }
+  }
+
+  function showFixStreetDialog({ officialName, hnCount, segmentCount, nearestStreetName, onRename, onAddAnyway, onCancel }) {
+    closeFixStreetDialog();
+
+    const addAnywayLabel = nearestStreetName
+      ? `Add to "${escapeHtml(nearestStreetName)}" anyway`
+      : 'Add to unnamed segment anyway';
+
+    const primaryBtnStyle = 'font-size:12px;padding:4px 10px;cursor:pointer;border:1px solid #28a745;border-radius:3px;background:#d4edda;color:#155724;font-weight:bold;';
+    const plainBtnStyle = 'font-size:12px;padding:4px 10px;cursor:pointer;border:1px solid #ccc;border-radius:3px;background:#f8f8f8;color:#333;';
+
+    const div = document.createElement('div');
+    div.id = 'qhnsl-fix-street-dialog';
+    div.style.cssText = 'position:fixed;top:70px;left:50%;transform:translateX(-50%);z-index:10000;'
+      + 'background:#fff;border:1px solid #ffc107;border-radius:6px;box-shadow:0 2px 12px rgba(0,0,0,0.35);'
+      + 'padding:12px 16px;font-size:13px;max-width:440px;font-family:inherit;';
+    div.innerHTML = `
+      <div style="margin-bottom:6px;">⚠️ Official street <b>"${escapeHtml(officialName)}"</b> not found in WME</div>
+      <div style="font-size:12px;color:#555;margin-bottom:10px;">
+        ${hnCount} house number${hnCount === 1 ? '' : 's'} belong${hnCount === 1 ? 's' : ''} to it (highlighted blue) •
+        ${segmentCount} segment${segmentCount === 1 ? '' : 's'} selected<br/>
+        Adjust the segment selection on the map if needed, then rename.
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;">
+        <button class="fix-rename-btn" style="${primaryBtnStyle}">✓ Rename selected segments</button>
+        <button class="fix-copy-btn" style="${plainBtnStyle}">📋 Copy name</button>
+        <button class="fix-add-anyway-btn" style="${plainBtnStyle}">${addAnywayLabel}</button>
+        <button class="fix-cancel-btn" style="${plainBtnStyle}">✕ Cancel</button>
+      </div>`;
+
+    div.querySelector('.fix-rename-btn').addEventListener('click', onRename);
+    div.querySelector('.fix-copy-btn').addEventListener('click', () => copyToClipboard(officialName));
+    div.querySelector('.fix-add-anyway-btn').addEventListener('click', onAddAnyway);
+    div.querySelector('.fix-cancel-btn').addEventListener('click', onCancel);
+
+    document.body.appendChild(div);
+    fixStreetDialogEl = div;
+  }
+
+  // Rename all currently selected segments to the given street name via WME SDK.
+  // Returns the number of segments successfully renamed.
   function updateSegmentStreetName(newStreetName, onSuccess) {
     const selectedSegments = getSelectedSegments();
     if (selectedSegments.length === 0) {
       toast('No segment selected', 'warning');
-      return;
+      return 0;
     }
 
-    const segment = selectedSegments[0];
-    const segmentId = segment.id;
+    let renamed = 0;
+    let failed = 0;
 
-    // Get current city from the segment
-    const currentStreetId = segment.primaryStreetId;
-    const currentStreet = currentStreetId ? wmeSDK.DataModel.Streets.getById({ streetId: currentStreetId }) : null;
-    const cityId = currentStreet?.cityId;
+    selectedSegments.forEach(segment => {
+      try {
+        // Resolve the city from the segment's current primary street
+        const currentStreet = segment.primaryStreetId
+          ? wmeSDK.DataModel.Streets.getById({ streetId: segment.primaryStreetId })
+          : null;
+        const cityId = currentStreet?.cityId;
 
-    if (!cityId) {
-      toast('Segment has no city assigned', 'warning');
-      return;
-    }
+        if (!cityId) {
+          console.warn('[SL-HN] Segment has no resolvable city, skipping:', segment.id);
+          failed++;
+          return;
+        }
 
-    try {
-      // First, try to get existing street with this name in this city
-      let street = wmeSDK.DataModel.Streets.getStreet({
-        cityId: cityId,
-        streetName: newStreetName
-      });
-
-      // If not found, create the street
-      if (!street) {
-        console.debug('[SL-HN] Street not found, creating new street:', newStreetName);
-        street = wmeSDK.DataModel.Streets.addStreet({
-          streetName: newStreetName,
-          cityId: cityId
+        // Get existing street with this name in this city, or create it
+        let street = wmeSDK.DataModel.Streets.getStreet({
+          cityId: cityId,
+          streetName: newStreetName
         });
+        if (!street) {
+          console.debug('[SL-HN] Street not found, creating new street:', newStreetName);
+          street = wmeSDK.DataModel.Streets.addStreet({
+            streetName: newStreetName,
+            cityId: cityId
+          });
+        }
+
+        wmeSDK.DataModel.Segments.updateAddress({
+          segmentId: segment.id,
+          primaryStreetId: street.id
+        });
+        console.debug('[SL-HN] Updated segment', segment.id, 'to street ID:', street.id);
+        renamed++;
+      } catch (err) {
+        console.error('[SL-HN] Error renaming segment', segment.id, err);
+        failed++;
       }
+    });
 
-      console.debug('[SL-HN] Got street:', street);
-
-      // Now update the segment with the new street ID
-      wmeSDK.DataModel.Segments.updateAddress({
-        segmentId: segmentId,
-        primaryStreetId: street.id
-      });
-
-      console.debug('[SL-HN] Updated segment', segmentId, 'to street ID:', street.id);
-      toast(`Updated street to "${newStreetName}"`, 'success');
-
-      if (typeof onSuccess === 'function') {
-        onSuccess();
-      }
-    } catch (err) {
-      console.error('[SL-HN] Error updating street name:', err);
-      toast('Error updating street name. See console.', 'error');
+    if (renamed === 0) {
+      toast('Could not rename any segment. See console.', 'error');
+      return 0;
     }
+
+    if (failed > 0) {
+      toast(`Renamed ${renamed} of ${renamed + failed} segments to "${newStreetName}"`, 'warning');
+    } else {
+      toast(`Updated street to "${newStreetName}"`, 'success');
+    }
+
+    if (typeof onSuccess === 'function') {
+      onSuccess();
+    }
+    return renamed;
   }
 
   function init() {
@@ -335,6 +399,7 @@
     let streetNames = {};
     let streets = {};
     let lastFeatures = [];
+    let fixStreetHighlightStreetId = null; // official street ID whose HNs are highlighted during fix-street flow
     let lastSdkFeatureIds = [];
     let isLoading = false;
     let currentLoadId = 0;
@@ -369,12 +434,13 @@
       styleContext: {
         getFillColor: ({ feature }) => {
           const p = feature.properties;
+          if (p.fixHighlight) return '#4da6ff';
           if (p.conflict) return '#ff6666';
           return p.isSelectedStreet ? '#99ee99' : '#fb9c4f';
         },
         getOpacity: ({ feature }) => {
           const p = feature.properties;
-          if (p.conflict) return 1;
+          if (p.fixHighlight || p.conflict) return 1;
           return (p.isSelectedStreet && p.processed) ? 0.3 : 1;
         },
         getRadius: ({ feature }) => {
@@ -662,8 +728,20 @@
     }
 
 
+    // Single source of truth for which loaded HNs are currently drawn on the map.
+    // Used by both the layer redraw and the click hit-test so that circles hidden
+    // by the checkbox filters are never clickable.
+    function isFeatureVisible(feat) {
+      if (chkMissing?.hasAttribute('checked') && feat.processed) return false;
+      if (chkSelectedOnly?.hasAttribute('checked') && currentStreetId
+          && feat.street !== currentStreetId && feat.street !== fixStreetHighlightStreetId) return false;
+      return true;
+    }
+
     function handleMapClick(evt) {
-      if (!userWantsLayerVisible || !lastFeatures.length) return;
+      // lastComputedVisibility is false when the layer is hidden (e.g. zoom < 18):
+      // no visible circles means clicks must do nothing.
+      if (!userWantsLayerVisible || !lastComputedVisibility || !lastFeatures.length) return;
       if (evt == null || evt.x == null || evt.y == null) return;
 
       const MAX_PIXELS_SQ = MAX_CLICK_DISTANCE_PX * MAX_CLICK_DISTANCE_PX;
@@ -672,6 +750,7 @@
 
       for (const f of lastFeatures) {
         if (f.lon == null || f.lat == null) continue;
+        if (!isFeatureVisible(f)) continue;
         const fPx = wmeSDK.Map.getMapPixelFromLonLat({ lonLat: { lon: f.lon, lat: f.lat } });
         if (!fPx) continue;
         const dx = fPx.x - evt.x;
@@ -690,39 +769,40 @@
     wmeSDK.Events.on({ eventName: 'wme-map-mouse-click', eventHandler: handleMapClick });
 
     function onFeatureClick(feature) {
+      // A new click supersedes any open fix-street dialog
+      clearFixStreetState();
+
       if (feature.processed) return;
 
       const streetName = streetNames[feature.street];
-      const houseNumber = feature.number;
 
-      let nearestSegment = findNearestSegment(feature, streetName, true);
-
-      if (!nearestSegment) {
-        nearestSegment = findNearestSegment(feature, streetName, false);
-
-        if (!nearestSegment) {
-          toast('No nearby segment found', 'warning');
-          return;
-        }
-
-        const nearestStreet = wmeSDK.DataModel.Streets.getById({ streetId: nearestSegment.primaryStreetId });
-        const nearestStreetName = nearestStreet?.name || 'Unknown';
-
-        if (!confirm(`Street name "${streetName}" could not be found.\n\nDo you want to add this number to "${nearestStreetName}"?`)) {
-          return;
-        }
+      const nearestSegment = findNearestSegment(feature, streetName, true);
+      if (nearestSegment) {
+        addHouseNumberToSegment(feature, nearestSegment);
+        return;
       }
 
-      wmeSDK.Editing.setSelection({ selection: { ids: [nearestSegment.id], objectType: 'segment' } });
+      const fallbackSegment = findNearestSegment(feature, streetName, false);
+      if (!fallbackSegment) {
+        toast('No nearby segment found', 'warning');
+        return;
+      }
+
+      startFixStreetFlow(feature, streetName, fallbackSegment);
+    }
+
+    // Attach a house number to a segment (shared by direct add, "add anyway" and post-rename auto-add)
+    function addHouseNumberToSegment(feature, segment) {
+      wmeSDK.Editing.setSelection({ selection: { ids: [segment.id], objectType: 'segment' } });
 
       const key = featKey(feature.street, feature.number);
       // Set before the call so a synchronous added-event can pair the new id with this feature.
       pendingAddKey = key;
       try {
         wmeSDK.DataModel.HouseNumbers.addHouseNumber({
-          number: houseNumber,
+          number: feature.number,
           point: { type: 'Point', coordinates: [feature.lon, feature.lat] },
-          segmentId: nearestSegment.id
+          segmentId: segment.id
         });
 
         // Remember this add: fetchHouseNumbers won't report it until the editor saves.
@@ -731,8 +811,8 @@
         feature.conflict = false;
         applyFeatureFilter();
 
-        console.log('[SL-HN] Added house number', houseNumber);
-        toast(`Added house number ${houseNumber}`, 'success');
+        console.log('[SL-HN] Added house number', feature.number);
+        toast(`Added house number ${feature.number}`, 'success');
       } catch (err) {
         pendingAddKey = null;
         console.error('[SL-HN] Error adding house number:', err);
@@ -740,9 +820,90 @@
       }
     }
 
+    // Close the fix-street dialog and remove the blue HN highlight
+    function clearFixStreetState() {
+      closeFixStreetDialog();
+      if (fixStreetHighlightStreetId !== null) {
+        fixStreetHighlightStreetId = null;
+        applyFeatureFilter();
+      }
+    }
+
+    // Official street name not found in WME: preview affected segments and offer a one-click rename
+    function startFixStreetFlow(feature, officialName, fallbackSegment) {
+      const matchedHNs = lastFeatures.filter(f => f.street === feature.street);
+
+      // Candidate segments = nearest segment to each matched HN, minus ones already named correctly
+      const officialLower = officialName.toLowerCase();
+      const candidateIds = new Set();
+      matchedHNs.forEach(f => {
+        const seg = findNearestSegment(f, null, false);
+        if (!seg) return;
+        const street = seg.primaryStreetId
+          ? wmeSDK.DataModel.Streets.getById({ streetId: seg.primaryStreetId })
+          : null;
+        if (street?.name && street.name.toLowerCase() === officialLower) return;
+        candidateIds.add(seg.id);
+      });
+
+      const segmentIds = [...candidateIds];
+      if (segmentIds.length > 0) {
+        wmeSDK.Editing.setSelection({ selection: { ids: segmentIds, objectType: 'segment' } });
+      }
+
+      fixStreetHighlightStreetId = feature.street;
+      applyFeatureFilter();
+
+      const fallbackStreet = fallbackSegment.primaryStreetId
+        ? wmeSDK.DataModel.Streets.getById({ streetId: fallbackSegment.primaryStreetId })
+        : null;
+
+      showFixStreetDialog({
+        officialName,
+        hnCount: matchedHNs.length,
+        segmentCount: segmentIds.length,
+        nearestStreetName: fallbackStreet?.name || null,
+        onRename: () => {
+          // Renames whatever is selected NOW (user may have adjusted the selection)
+          const renamed = updateSegmentStreetName(officialName, null);
+          if (renamed === 0) return; // nothing renamed (empty selection / all failed): keep dialog open
+
+          // Make the renamed street the current one so its circles turn green immediately
+          // (updateAddress fires no selection event, so onSelectionChanged won't do it for us)
+          const newStreetId = streets[officialName];
+          if (newStreetId) {
+            currentStreetId = newStreetId;
+            if (streetNameSpan && currentStreetDiv) {
+              streetNameSpan.textContent = officialName;
+              currentStreetDiv.style.display = 'block';
+            }
+          }
+
+          clearFixStreetState(); // repaints via applyFeatureFilter
+          analyzeStreetMatches();
+
+          // Renamed segments now match the official name; auto-add the clicked HN
+          const seg = findNearestSegment(feature, officialName, true);
+          if (seg) {
+            addHouseNumberToSegment(feature, seg);
+          } else {
+            toast('Street renamed — click the house number again to add it', 'info');
+          }
+        },
+        onAddAnyway: () => {
+          clearFixStreetState();
+          addHouseNumberToSegment(feature, fallbackSegment);
+        },
+        onCancel: () => {
+          clearFixStreetState();
+        }
+      });
+    }
+
     function findNearestSegment(feature, streetName, matchName) {
       const point = { x: feature.lon, y: feature.lat };
-      const allSegments = wmeSDK.DataModel.Segments.getAll();
+      const allSegments = wmeSDK.DataModel.Segments.getAll()
+        .filter(segment => !NON_ADDRESSABLE_ROAD_TYPES.has(segment.roadType));
       let candidateSegments = allSegments;
 
       if (matchName) {
@@ -915,6 +1076,7 @@
 
       async function loadSelectedStreet() {
         if (isLoading) return;
+        clearFixStreetState();
         isLoading = true;
         const myLoadId = ++currentLoadId;
         btnLoad.disabled = true;
@@ -948,13 +1110,14 @@
       btnLoad.addEventListener('click', loadSelectedStreet);
 
       function clearLayer() {
+        clearFixStreetState();
         currentLoadId++; // invalidate any in-flight load so its results are discarded
         if (lastSdkFeatureIds.length) {
           wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_LAYER_NAME, featureIds: lastSdkFeatureIds });
           lastSdkFeatureIds = [];
         }
         userWantsLayerVisible = false;
-        wmeSDK.Map.setLayerVisibility({ layerName: SDK_LAYER_NAME, visibility: false });
+        updateLayerVisibility(); // keeps lastComputedVisibility in sync (a direct setLayerVisibility here left it stale)
         setChecked(chkVis, false);
         LS.setLayerVisible(false);
         streets = {};
@@ -971,13 +1134,7 @@
       btnClear.addEventListener('click', clearLayer);
 
       applyFeatureFilter = function () {
-        const onlyMissing  = chkMissing?.hasAttribute('checked');
-        const selectedOnly = chkSelectedOnly?.hasAttribute('checked');
-        const visible = lastFeatures.filter(feat => {
-          if (onlyMissing && feat.processed) return false;
-          if (selectedOnly && currentStreetId && feat.street !== currentStreetId) return false;
-          return true;
-        });
+        const visible = lastFeatures.filter(isFeatureVisible);
         if (lastSdkFeatureIds.length) {
           wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_LAYER_NAME, featureIds: lastSdkFeatureIds });
         }
@@ -990,7 +1147,8 @@
             street: feat.street,
             processed: feat.processed,
             conflict: feat.conflict,
-            isSelectedStreet: feat.street === currentStreetId
+            isSelectedStreet: feat.street === currentStreetId,
+            fixHighlight: fixStreetHighlightStreetId != null && feat.street === fixStreetHighlightStreetId
           }
         }));
         wmeSDK.Map.addFeaturesToLayer({ layerName: SDK_LAYER_NAME, features: visibleSdk });
