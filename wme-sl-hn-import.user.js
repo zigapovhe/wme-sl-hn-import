@@ -343,6 +343,16 @@
     let currentStreetDiv = null;
     let streetAnalysisDiv = null;
 
+    // Track unsaved house-number edits this session. fetchHouseNumbers reflects the
+    // SAVED state only: it keeps returning pending-deleted HNs and omits pending-added
+    // ones until the editor saves. We layer our own edits on top, keyed by the stable
+    // houseNumberId the SDK events provide.
+    const deletedHnIds = new Set();     // HNs deleted this session (still in saved model until save)
+    const sessionAddedKeys = new Set(); // feature keys we added this session (not yet in saved model)
+    const hnIdToAddedKey = new Map();   // added houseNumberId -> feature key, to undo on later delete
+    let pendingAddKey = null;           // set just before addHouseNumber, consumed by the added event
+    const featKey = (streetId, number) => `${streetId} ${number}`;
+
     let chkMissing = null;
     let chkSelectedOnly = null;
 
@@ -705,6 +715,9 @@
 
       wmeSDK.Editing.setSelection({ selection: { ids: [nearestSegment.id], objectType: 'segment' } });
 
+      const key = featKey(feature.street, feature.number);
+      // Set before the call so a synchronous added-event can pair the new id with this feature.
+      pendingAddKey = key;
       try {
         wmeSDK.DataModel.HouseNumbers.addHouseNumber({
           number: houseNumber,
@@ -712,7 +725,8 @@
           segmentId: nearestSegment.id
         });
 
-        feature.userAdded = true;
+        // Remember this add: fetchHouseNumbers won't report it until the editor saves.
+        sessionAddedKeys.add(key);
         feature.processed = true;
         feature.conflict = false;
         applyFeatureFilter();
@@ -720,6 +734,7 @@
         console.log('[SL-HN] Added house number', houseNumber);
         toast(`Added house number ${houseNumber}`, 'success');
       } catch (err) {
+        pendingAddKey = null;
         console.error('[SL-HN] Error adding house number:', err);
         toast('Error adding house number. See console.', 'error');
       }
@@ -992,7 +1007,8 @@
           if (!hn || !streetId) return;
 
           const entry = selectionHNMap.get(streetId);
-          const processed = (entry?.set.has(hn) === true) || feat.userAdded === true;
+          // Saved state (entry) OR an HN we added this session that isn't saved yet.
+          const processed = entry?.set.has(hn) === true || sessionAddedKeys.has(featKey(streetId, hn));
           const conflict = !processed && hasConflict(hn, eX, eY, entry);
 
           feat.processed = processed;
@@ -1003,32 +1019,49 @@
       }
 
       function setupHouseNumberEventListeners() {
-        const events = [
-          'wme-house-number-added',
-          'wme-house-number-deleted',
-          'wme-house-number-moved',
-          'wme-house-number-updated'
-        ];
+        const refresh = () => {
+          if (lastFeatures.length > 0) {
+            recalculateFeatureStates().catch(err => console.warn('[SL-HN] recalculate failed:', err));
+          }
+        };
 
-        events.forEach(eventName => {
-          wmeSDK.Events.on({
-            eventName,
-            eventHandler: () => {
-              if (lastFeatures.length > 0) {
-                recalculateFeatureStates().catch(err => console.warn('[SL-HN] recalculate failed:', err));
-              }
-            }
-          });
-        });
-
+        // An HN was added — if it was our pending add, remember its id so we can undo
+        // the session-added overlay if the same HN is later deleted.
         wmeSDK.Events.on({
-          eventName: 'wme-map-data-loaded',
-          eventHandler: () => {
-            if (lastFeatures.length > 0) {
-              recalculateFeatureStates().catch(err => console.warn('[SL-HN] recalculate failed:', err));
+          eventName: 'wme-house-number-added',
+          eventHandler: (payload) => {
+            const hnId = payload?.houseNumberId;
+            if (hnId != null && pendingAddKey != null) {
+              hnIdToAddedKey.set(hnId, pendingAddKey);
             }
+            pendingAddKey = null;
+            refresh();
           }
         });
+
+        // An HN was deleted — record its id (the model keeps returning it until save) and
+        // drop any matching session-added overlay so the circle un-fades immediately.
+        wmeSDK.Events.on({
+          eventName: 'wme-house-number-deleted',
+          eventHandler: (payload) => {
+            const hnId = payload?.houseNumberId;
+            if (hnId != null) {
+              deletedHnIds.add(hnId);
+              const key = hnIdToAddedKey.get(hnId);
+              if (key != null) {
+                sessionAddedKeys.delete(key);
+                hnIdToAddedKey.delete(hnId);
+              }
+            }
+            refresh();
+          }
+        });
+
+        ['wme-house-number-moved', 'wme-house-number-updated'].forEach(eventName => {
+          wmeSDK.Events.on({ eventName, eventHandler: refresh });
+        });
+
+        wmeSDK.Events.on({ eventName: 'wme-map-data-loaded', eventHandler: refresh });
 
         // Listen for segment edits (like street name changes) to refresh UI
         wmeSDK.Events.on({
@@ -1305,7 +1338,7 @@
                 }
 
                 const entry = selectionHNMap.get(streetId);
-                const processed = entry?.set.has(hn) === true;
+                const processed = entry?.set.has(hn) === true || sessionAddedKeys.has(featKey(streetId, hn));
                 const conflict = !processed && hasConflict(hn, e, n, entry);
 
                 features.push({
@@ -1395,6 +1428,8 @@
           : [];
 
         allHns.forEach(hn => {
+          // Skip HNs deleted this session: the model still returns them until save.
+          if (deletedHnIds.has(hn.id)) return;
           const seg = wmeSDK.DataModel.Segments.getById({ segmentId: hn.segmentId });
           if (!seg) return;
 
@@ -1416,7 +1451,7 @@
           if (x == null || y == null || x < lonMin || x > lonMax || y < latMin || y > latMax) return;
 
           const [eX, eY] = proj4('EPSG:4326', 'EPSG:3794', [x, y]);
-          const numRaw = String(hn.number).trim();
+          const numRaw = String(hn.number).trim().toLowerCase();
 
           streetIdSet.forEach(streetId => {
             const st = wmeSDK.DataModel.Streets.getById({ streetId });
