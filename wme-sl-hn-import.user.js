@@ -1232,8 +1232,12 @@
           eventName: 'wme-house-number-added',
           eventHandler: (payload) => {
             const hnId = payload?.houseNumberId;
-            if (hnId != null && pendingAddKey != null) {
-              hnIdToAddedKey.set(hnId, pendingAddKey);
+            if (hnId != null) {
+              // An undone delete re-adds the HN with the same id — stop skipping it.
+              deletedHnIds.delete(hnId);
+              if (pendingAddKey != null) {
+                hnIdToAddedKey.set(hnId, pendingAddKey);
+              }
             }
             pendingAddKey = null;
             refresh();
@@ -1263,6 +1267,25 @@
         });
 
         wmeSDK.Events.on({ eventName: 'wme-map-data-loaded', eventHandler: refresh });
+
+        // A successful save is the reconciliation point: fetchHouseNumbers now
+        // reflects reality, and saved HNs get new permanent ids, so the session
+        // overlays (keyed by pre-save ids) would only drift from here — drop them.
+        try {
+          wmeSDK.Events.on({
+            eventName: 'wme-save-finished',
+            eventHandler: (payload) => {
+              if (payload && payload.success === false) return;
+              sessionAddedKeys.clear();
+              deletedHnIds.clear();
+              hnIdToAddedKey.clear();
+              pendingAddKey = null;
+              refresh();
+            }
+          });
+        } catch (err) {
+          console.warn('[SL-HN] could not subscribe to wme-save-finished:', err);
+        }
 
         // Listen for segment edits (like street name changes) to refresh UI
         wmeSDK.Events.on({
