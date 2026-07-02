@@ -44,6 +44,13 @@
   // 16 stairway, 18 railroad, 19 runway/taxiway
   const NON_ADDRESSABLE_ROAD_TYPES = new Set([5, 10, 16, 18, 19]);
 
+  // A name-matched segment counts as "suspiciously far" when it is farther than
+  // FAR_STREET_MIN_DISTANCE meters AND more than FAR_STREET_RATIO times farther
+  // than the closest segment of any name. Both must hold: the floor keeps
+  // driveway-adjacent houses quiet, the ratio keeps remote farmhouses quiet.
+  const FAR_STREET_MIN_DISTANCE = 50;
+  const FAR_STREET_RATIO = 2;
+
   // EProstor API configuration
   const EPROSTOR_API = 'https://ipi.eprostor.gov.si/wfs-si-gurs-rn/ogc/features/collections/SI.GURS.RN:REGISTER_NASLOVOV/items';
   const EPROSTOR_LIMIT = 1000;
@@ -288,12 +295,19 @@
     }
   }
 
-  function showFixStreetDialog({ officialName, hnCount, segmentCount, nearestStreetName, onRename, onAddAnyway, onCancel }) {
+  function showFixStreetDialog({ officialName, hnCount, segmentCount, nearestStreetName, farInfo, onRename, onAddAnyway, onCancel }) {
     closeFixStreetDialog();
 
-    const addAnywayLabel = nearestStreetName
-      ? `Add to "${escapeHtml(nearestStreetName)}" anyway`
-      : 'Add to unnamed segment anyway';
+    const escapedOfficial = escapeHtml(officialName);
+    const headerHtml = farInfo
+      ? `⚠️ Official street <b>"${escapedOfficial}"</b> is ~${Math.round(farInfo.farDistance)} m away — the nearest segment (${Math.round(farInfo.nearestDistance)} m) has a different name`
+      : `⚠️ Official street <b>"${escapedOfficial}"</b> not found in WME`;
+
+    const addAnywayLabel = farInfo
+      ? `Add to "${escapedOfficial}" ${Math.round(farInfo.farDistance)} m away`
+      : (nearestStreetName
+        ? `Add to "${escapeHtml(nearestStreetName)}" anyway`
+        : 'Add to unnamed segment anyway');
 
     const primaryBtnStyle = 'font-size:12px;padding:4px 10px;cursor:pointer;border:1px solid #28a745;border-radius:3px;background:#d4edda;color:#155724;font-weight:bold;';
     const plainBtnStyle = 'font-size:12px;padding:4px 10px;cursor:pointer;border:1px solid #ccc;border-radius:3px;background:#f8f8f8;color:#333;';
@@ -304,7 +318,7 @@
       + 'background:#fff;border:1px solid #ffc107;border-radius:6px;box-shadow:0 2px 12px rgba(0,0,0,0.35);'
       + 'padding:12px 16px;font-size:13px;max-width:440px;font-family:inherit;';
     div.innerHTML = `
-      <div style="margin-bottom:6px;">⚠️ Official street <b>"${escapeHtml(officialName)}"</b> not found in WME</div>
+      <div style="margin-bottom:6px;">${headerHtml}</div>
       <div style="font-size:12px;color:#555;margin-bottom:10px;">
         ${hnCount} house number${hnCount === 1 ? '' : 's'} belong${hnCount === 1 ? 's' : ''} to it (highlighted blue) •
         ${segmentCount} segment${segmentCount === 1 ? '' : 's'} selected<br/>
@@ -776,19 +790,37 @@
 
       const streetName = streetNames[feature.street];
 
-      const nearestSegment = findNearestSegment(feature, streetName, true);
-      if (nearestSegment) {
-        addHouseNumberToSegment(feature, nearestSegment);
+      const named = findNearestSegment(feature, streetName, true);
+      const nearest = findNearestSegment(feature, streetName, false);
+
+      if (named) {
+        // The official street exists — but when it is much farther away than the
+        // closest differently-named segment, that closer segment is probably the
+        // real street carrying a wrong or missing name. Ask instead of silently
+        // adding the HN far from the house.
+        const suspiciouslyFar = nearest
+          && nearest.segment.id !== named.segment.id
+          && named.distance > FAR_STREET_MIN_DISTANCE
+          && named.distance > FAR_STREET_RATIO * nearest.distance;
+
+        if (!suspiciouslyFar) {
+          addHouseNumberToSegment(feature, named.segment);
+          return;
+        }
+
+        startFixStreetFlow(feature, streetName, named.segment, {
+          farDistance: named.distance,
+          nearestDistance: nearest.distance
+        });
         return;
       }
 
-      const fallbackSegment = findNearestSegment(feature, streetName, false);
-      if (!fallbackSegment) {
+      if (!nearest) {
         toast('No nearby segment found', 'warning');
         return;
       }
 
-      startFixStreetFlow(feature, streetName, fallbackSegment);
+      startFixStreetFlow(feature, streetName, nearest.segment);
     }
 
     // Attach a house number to a segment (shared by direct add, "add anyway" and post-rename auto-add)
@@ -829,16 +861,20 @@
       }
     }
 
-    // Official street name not found in WME: preview affected segments and offer a one-click rename
-    function startFixStreetFlow(feature, officialName, fallbackSegment) {
+    // Official street name missing in WME (or only found suspiciously far away):
+    // preview affected segments and offer a one-click rename. addAnywaySegment is
+    // where "Add anyway" attaches the HN; farInfo = { farDistance, nearestDistance }
+    // marks the far-match variant.
+    function startFixStreetFlow(feature, officialName, addAnywaySegment, farInfo) {
       const matchedHNs = lastFeatures.filter(f => f.street === feature.street);
 
       // Candidate segments = nearest segment to each matched HN, minus ones already named correctly
       const officialLower = officialName.toLowerCase();
       const candidateIds = new Set();
       matchedHNs.forEach(f => {
-        const seg = findNearestSegment(f, null, false);
-        if (!seg) return;
+        const found = findNearestSegment(f, null, false);
+        if (!found) return;
+        const seg = found.segment;
         const street = seg.primaryStreetId
           ? wmeSDK.DataModel.Streets.getById({ streetId: seg.primaryStreetId })
           : null;
@@ -854,15 +890,16 @@
       fixStreetHighlightStreetId = feature.street;
       applyFeatureFilter();
 
-      const fallbackStreet = fallbackSegment.primaryStreetId
-        ? wmeSDK.DataModel.Streets.getById({ streetId: fallbackSegment.primaryStreetId })
+      const addAnywayStreet = addAnywaySegment.primaryStreetId
+        ? wmeSDK.DataModel.Streets.getById({ streetId: addAnywaySegment.primaryStreetId })
         : null;
 
       showFixStreetDialog({
         officialName,
         hnCount: matchedHNs.length,
         segmentCount: segmentIds.length,
-        nearestStreetName: fallbackStreet?.name || null,
+        nearestStreetName: addAnywayStreet?.name || null,
+        farInfo,
         onRename: () => {
           // Renames whatever is selected NOW (user may have adjusted the selection)
           const renamed = updateSegmentStreetName(officialName, null);
@@ -883,16 +920,16 @@
           analyzeStreetMatches();
 
           // Renamed segments now match the official name; auto-add the clicked HN
-          const seg = findNearestSegment(feature, officialName, true);
-          if (seg) {
-            addHouseNumberToSegment(feature, seg);
+          const found = findNearestSegment(feature, officialName, true);
+          if (found) {
+            addHouseNumberToSegment(feature, found.segment);
           } else {
             toast('Street renamed — click the house number again to add it', 'info');
           }
         },
         onAddAnyway: () => {
           clearFixStreetState();
-          addHouseNumberToSegment(feature, fallbackSegment);
+          addHouseNumberToSegment(feature, addAnywaySegment);
         },
         onCancel: () => {
           clearFixStreetState();
@@ -900,8 +937,13 @@
       });
     }
 
+    // Returns { segment, distance } with distance in approximate meters, or null.
     function findNearestSegment(feature, streetName, matchName) {
       const point = { x: feature.lon, y: feature.lat };
+      // WGS84 → meters scaling around the feature's latitude; plenty accurate
+      // for comparing segments within a loaded area a few km across.
+      const M_PER_DEG_LAT = 111320;
+      const mPerDegLon = M_PER_DEG_LAT * Math.cos(feature.lat * Math.PI / 180);
       const allSegments = wmeSDK.DataModel.Segments.getAll()
         .filter(segment => !NON_ADDRESSABLE_ROAD_TYPES.has(segment.roadType));
       let candidateSegments = allSegments;
@@ -932,24 +974,25 @@
       candidateSegments.forEach(segment => {
         const coords = segment.geometry?.coordinates;
         if (!Array.isArray(coords) || coords.length < 2) return;
-        const distance = pointToLineDistance(point, coords);
+        const distance = pointToLineDistance(point, coords, mPerDegLon, M_PER_DEG_LAT);
         if (distance < minDistance) {
           minDistance = distance;
           nearestSegment = segment;
         }
       });
 
-      return nearestSegment;
+      return nearestSegment ? { segment: nearestSegment, distance: minDistance } : null;
     }
 
-    function pointToLineDistance(point, coords) {
-      const px = point.x;
-      const py = point.y;
+    // sx/sy scale lon/lat into meters so the returned distance is in meters.
+    function pointToLineDistance(point, coords, sx = 1, sy = 1) {
+      const px = point.x * sx;
+      const py = point.y * sy;
       let minDist = Infinity;
       for (let i = 0; i < coords.length - 1; i++) {
         const [x1, y1] = coords[i];
         const [x2, y2] = coords[i + 1];
-        const dist = pointToSegmentDistance(px, py, x1, y1, x2, y2);
+        const dist = pointToSegmentDistance(px, py, x1 * sx, y1 * sy, x2 * sx, y2 * sy);
         if (dist < minDist) minDist = dist;
       }
       return minDist;
