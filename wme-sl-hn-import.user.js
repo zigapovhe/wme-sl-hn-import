@@ -753,37 +753,38 @@
     function onFeatureClick(feature) {
       if (feature.processed) return;
 
+      // A new click supersedes any open fix-street dialog
+      clearFixStreetState();
+
       const streetName = streetNames[feature.street];
-      const houseNumber = feature.number;
 
-      let nearestSegment = findNearestSegment(feature, streetName, true);
-
-      if (!nearestSegment) {
-        nearestSegment = findNearestSegment(feature, streetName, false);
-
-        if (!nearestSegment) {
-          toast('No nearby segment found', 'warning');
-          return;
-        }
-
-        const nearestStreet = wmeSDK.DataModel.Streets.getById({ streetId: nearestSegment.primaryStreetId });
-        const nearestStreetName = nearestStreet?.name || 'Unknown';
-
-        if (!confirm(`Street name "${streetName}" could not be found.\n\nDo you want to add this number to "${nearestStreetName}"?`)) {
-          return;
-        }
+      const nearestSegment = findNearestSegment(feature, streetName, true);
+      if (nearestSegment) {
+        addHouseNumberToSegment(feature, nearestSegment);
+        return;
       }
 
-      wmeSDK.Editing.setSelection({ selection: { ids: [nearestSegment.id], objectType: 'segment' } });
+      const fallbackSegment = findNearestSegment(feature, streetName, false);
+      if (!fallbackSegment) {
+        toast('No nearby segment found', 'warning');
+        return;
+      }
+
+      startFixStreetFlow(feature, streetName, fallbackSegment);
+    }
+
+    // Attach a house number to a segment (shared by direct add, "add anyway" and post-rename auto-add)
+    function addHouseNumberToSegment(feature, segment) {
+      wmeSDK.Editing.setSelection({ selection: { ids: [segment.id], objectType: 'segment' } });
 
       const key = featKey(feature.street, feature.number);
       // Set before the call so a synchronous added-event can pair the new id with this feature.
       pendingAddKey = key;
       try {
         wmeSDK.DataModel.HouseNumbers.addHouseNumber({
-          number: houseNumber,
+          number: feature.number,
           point: { type: 'Point', coordinates: [feature.lon, feature.lat] },
-          segmentId: nearestSegment.id
+          segmentId: segment.id
         });
 
         // Remember this add: fetchHouseNumbers won't report it until the editor saves.
@@ -792,13 +793,93 @@
         feature.conflict = false;
         applyFeatureFilter();
 
-        console.log('[SL-HN] Added house number', houseNumber);
-        toast(`Added house number ${houseNumber}`, 'success');
+        console.log('[SL-HN] Added house number', feature.number);
+        toast(`Added house number ${feature.number}`, 'success');
       } catch (err) {
         pendingAddKey = null;
         console.error('[SL-HN] Error adding house number:', err);
         toast('Error adding house number. See console.', 'error');
       }
+    }
+
+    // Close the fix-street dialog and remove the blue HN highlight
+    function clearFixStreetState() {
+      closeFixStreetDialog();
+      if (fixStreetHighlightStreetId !== null) {
+        fixStreetHighlightStreetId = null;
+        applyFeatureFilter();
+      }
+    }
+
+    // Official street name not found in WME: preview affected segments and offer a one-click rename
+    function startFixStreetFlow(feature, officialName, fallbackSegment) {
+      const matchedHNs = lastFeatures.filter(f => f.street === feature.street);
+
+      // Candidate segments = nearest segment to each matched HN, minus ones already named correctly
+      const officialLower = officialName.toLowerCase();
+      const candidateIds = new Set();
+      matchedHNs.forEach(f => {
+        const seg = findNearestSegment(f, null, false);
+        if (!seg) return;
+        const street = seg.primaryStreetId
+          ? wmeSDK.DataModel.Streets.getById({ streetId: seg.primaryStreetId })
+          : null;
+        if (street?.name && street.name.toLowerCase() === officialLower) return;
+        candidateIds.add(seg.id);
+      });
+
+      const segmentIds = [...candidateIds];
+      if (segmentIds.length > 0) {
+        wmeSDK.Editing.setSelection({ selection: { ids: segmentIds, objectType: 'segment' } });
+      }
+
+      fixStreetHighlightStreetId = feature.street;
+      applyFeatureFilter();
+
+      const fallbackStreet = fallbackSegment.primaryStreetId
+        ? wmeSDK.DataModel.Streets.getById({ streetId: fallbackSegment.primaryStreetId })
+        : null;
+
+      showFixStreetDialog({
+        officialName,
+        hnCount: matchedHNs.length,
+        segmentCount: segmentIds.length,
+        nearestStreetName: fallbackStreet?.name || null,
+        onRename: () => {
+          // Renames whatever is selected NOW (user may have adjusted the selection)
+          const renamed = updateSegmentStreetName(officialName, null);
+          if (renamed === 0) return; // nothing renamed (empty selection / all failed): keep dialog open
+
+          // Make the renamed street the current one so its circles turn green immediately
+          // (updateAddress fires no selection event, so onSelectionChanged won't do it for us)
+          const newStreetId = streets[officialName];
+          if (newStreetId) {
+            currentStreetId = newStreetId;
+            if (streetNameSpan && currentStreetDiv) {
+              streetNameSpan.textContent = officialName;
+              currentStreetDiv.style.display = 'block';
+            }
+          }
+
+          clearFixStreetState(); // repaints via applyFeatureFilter
+          analyzeStreetMatches();
+
+          // Renamed segments now match the official name; auto-add the clicked HN
+          const seg = findNearestSegment(feature, officialName, true);
+          if (seg) {
+            addHouseNumberToSegment(feature, seg);
+          } else {
+            toast('Street renamed — click the house number again to add it', 'info');
+          }
+        },
+        onAddAnyway: () => {
+          clearFixStreetState();
+          addHouseNumberToSegment(feature, fallbackSegment);
+        },
+        onCancel: () => {
+          clearFixStreetState();
+        }
+      });
     }
 
     function findNearestSegment(feature, streetName, matchName) {
@@ -1009,6 +1090,7 @@
       btnLoad.addEventListener('click', loadSelectedStreet);
 
       function clearLayer() {
+        clearFixStreetState();
         currentLoadId++; // invalidate any in-flight load so its results are discarded
         if (lastSdkFeatureIds.length) {
           wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_LAYER_NAME, featureIds: lastSdkFeatureIds });
