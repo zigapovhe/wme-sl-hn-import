@@ -751,10 +751,10 @@
     wmeSDK.Events.on({ eventName: 'wme-map-mouse-click', eventHandler: handleMapClick });
 
     function onFeatureClick(feature) {
-      if (feature.processed) return;
-
       // A new click supersedes any open fix-street dialog
       clearFixStreetState();
+
+      if (feature.processed) return;
 
       const streetName = streetNames[feature.street];
 
@@ -1057,6 +1057,7 @@
 
       async function loadSelectedStreet() {
         if (isLoading) return;
+        clearFixStreetState();
         isLoading = true;
         const myLoadId = ++currentLoadId;
         btnLoad.disabled = true;
@@ -1118,7 +1119,7 @@
         const selectedOnly = chkSelectedOnly?.hasAttribute('checked');
         const visible = lastFeatures.filter(feat => {
           if (onlyMissing && feat.processed) return false;
-          if (selectedOnly && currentStreetId && feat.street !== currentStreetId) return false;
+          if (selectedOnly && currentStreetId && feat.street !== currentStreetId && feat.street !== fixStreetHighlightStreetId) return false;
           return true;
         });
         if (lastSdkFeatureIds.length) {
