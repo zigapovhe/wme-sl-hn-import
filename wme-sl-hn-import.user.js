@@ -56,6 +56,11 @@
   const EPROSTOR_LIMIT = 1000;
   const EPROSTOR_MAX_PAGES = 30; // hard cap: 30 pages × 1000 addresses per load
 
+  // Shown in the status box on startup and after Clear
+  const INSTRUCTIONS_HTML = `<b>Instructions</b><br/>
+    1) Select a segment • 2) Click "Load selected street" • 3) <b>Click house numbers on map to add them</b><br/>
+    Green = selected street • Orange = other streets • Red = possible wrong HN • Faded = already in WME`;
+
   // Common Slovenian street name abbreviations
   const ABBREVIATIONS = {
     'c.': 'cesta',
@@ -426,6 +431,89 @@
     return renamed;
   }
 
+  // Returns { segment, distance } with distance in approximate meters, or null.
+  function findNearestSegment(feature, streetName, matchName) {
+    const point = { x: feature.lon, y: feature.lat };
+    // WGS84 → meters scaling around the feature's latitude; plenty accurate
+    // for comparing segments within a loaded area a few km across.
+    const M_PER_DEG_LAT = 111320;
+    const mPerDegLon = M_PER_DEG_LAT * Math.cos(feature.lat * Math.PI / 180);
+    const allSegments = wmeSDK.DataModel.Segments.getAll()
+      .filter(segment => !NON_ADDRESSABLE_ROAD_TYPES.has(segment.roadType));
+    let candidateSegments = allSegments;
+
+    if (matchName) {
+      const matchingStreetIds = wmeSDK.DataModel.Streets.getAll()
+        .filter(street => street.name?.toLowerCase() === streetName.toLowerCase())
+        .map(street => street.id);
+
+      if (matchingStreetIds.length === 0) {
+        return null;
+      }
+
+      candidateSegments = allSegments.filter(segment => {
+        const primaryMatch = matchingStreetIds.includes(segment.primaryStreetId);
+        const altMatch = (segment.alternateStreetIds || []).some(id => matchingStreetIds.includes(id));
+        return primaryMatch || altMatch;
+      });
+    }
+
+    if (candidateSegments.length === 0) {
+      return null;
+    }
+
+    let nearestSegment = null;
+    let minDistance = Infinity;
+
+    candidateSegments.forEach(segment => {
+      const coords = segment.geometry?.coordinates;
+      if (!Array.isArray(coords) || coords.length < 2) return;
+      const distance = pointToLineDistance(point, coords, mPerDegLon, M_PER_DEG_LAT);
+      if (distance < minDistance) {
+        minDistance = distance;
+        nearestSegment = segment;
+      }
+    });
+
+    return nearestSegment ? { segment: nearestSegment, distance: minDistance } : null;
+  }
+
+  // sx/sy scale lon/lat into meters so the returned distance is in meters.
+  function pointToLineDistance(point, coords, sx = 1, sy = 1) {
+    const px = point.x * sx;
+    const py = point.y * sy;
+    let minDist = Infinity;
+    for (let i = 0; i < coords.length - 1; i++) {
+      const [x1, y1] = coords[i];
+      const [x2, y2] = coords[i + 1];
+      const dist = pointToSegmentDistance(px, py, x1 * sx, y1 * sy, x2 * sx, y2 * sy);
+      if (dist < minDist) minDist = dist;
+    }
+    return minDist;
+  }
+
+  function pointToSegmentDistance(px, py, x1, y1, x2, y2) {
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const lengthSquared = dx * dx + dy * dy;
+
+    if (lengthSquared === 0) {
+      const dpx = px - x1;
+      const dpy = py - y1;
+      return Math.sqrt(dpx * dpx + dpy * dpy);
+    }
+
+    let t = ((px - x1) * dx + (py - y1) * dy) / lengthSquared;
+    t = Math.max(0, Math.min(1, t));
+
+    const closestX = x1 + t * dx;
+    const closestY = y1 + t * dy;
+
+    const dpx = px - closestX;
+    const dpy = py - closestY;
+    return Math.sqrt(dpx * dpx + dpy * dpy);
+  }
+
   function init() {
     let currentStreetId = null;
     let streetNames = {};
@@ -676,12 +764,7 @@
             const newStreetId = streets[streetName];
             if (newStreetId) {
               currentStreetId = newStreetId;
-
-              // Update the "Current street" display
-              if (streetNameSpan && currentStreetDiv) {
-                streetNameSpan.textContent = streetName;
-                currentStreetDiv.style.display = 'block';
-              }
+              showCurrentStreet(streetName);
             }
 
             // Re-analyze and redraw with updated state
@@ -693,6 +776,42 @@
         });
       });
     };
+
+    // Show/hide the "Current street" badge — the only place its DOM is touched.
+    function showCurrentStreet(name) {
+      if (streetNameSpan && currentStreetDiv) {
+        streetNameSpan.textContent = name;
+        currentStreetDiv.style.display = 'block';
+      }
+    }
+
+    function hideCurrentStreet() {
+      if (streetNameSpan && currentStreetDiv) {
+        streetNameSpan.textContent = '—';
+        currentStreetDiv.style.display = 'none';
+      }
+    }
+
+    // Map a set of WME street IDs to the loaded register street with the most
+    // house numbers. Shared by selection changes and the initial load.
+    function findBestMatchingStreetId(wmeStreetIds, featureList) {
+      const names = Array.from(wmeStreetIds)
+        .map(id => wmeSDK.DataModel.Streets.getById({ streetId: id })?.name)
+        .filter(Boolean);
+
+      let bestId = null;
+      let bestCount = -1;
+      names.forEach(name => {
+        const sid = streets[name];
+        if (!sid) return;
+        const count = featureList.reduce((n, f) => n + (f.street === sid ? 1 : 0), 0);
+        if (count > bestCount) {
+          bestCount = count;
+          bestId = sid;
+        }
+      });
+      return bestId;
+    }
 
     function onSelectionChanged() {
       if (!lastFeatures.length) return;
@@ -712,43 +831,13 @@
         });
       });
 
-      if (selectedStreetIds.size === 0) {
-        currentStreetId = null;
-        if (streetNameSpan && currentStreetDiv) {
-          streetNameSpan.textContent = '—';
-          currentStreetDiv.style.display = 'none';
-        }
-        applyFeatureFilter();
-        analyzeStreetMatches();
-        return;
-      }
-
-      const selectedStreetNames = Array.from(selectedStreetIds)
-        .map(id => wmeSDK.DataModel.Streets.getById({ streetId: id })?.name)
-        .filter(Boolean);
-
-      let newStreetId = null;
-      let bestCount = -1;
-
-      selectedStreetNames.forEach(name => {
-        const sid = streets[name];
-        if (!sid) return;
-        const count = lastFeatures.reduce(
-          (n, f) => n + (f.street === sid ? 1 : 0),
-          0
-        );
-        if (count > bestCount) {
-          bestCount = count;
-          newStreetId = sid;
-        }
-      });
+      const newStreetId = selectedStreetIds.size > 0
+        ? findBestMatchingStreetId(selectedStreetIds, lastFeatures)
+        : null;
 
       if (!newStreetId) {
         currentStreetId = null;
-        if (streetNameSpan && currentStreetDiv) {
-          streetNameSpan.textContent = '—';
-          currentStreetDiv.style.display = 'none';
-        }
+        hideCurrentStreet();
         applyFeatureFilter();
         analyzeStreetMatches();
         return;
@@ -758,9 +847,8 @@
       // (because we might be on a different segment with the same street)
       currentStreetId = newStreetId;
 
-      if (streetNameSpan && currentStreetDiv && streetNames[currentStreetId]) {
-        streetNameSpan.textContent = streetNames[currentStreetId];
-        currentStreetDiv.style.display = 'block';
+      if (streetNames[currentStreetId]) {
+        showCurrentStreet(streetNames[currentStreetId]);
       }
 
       applyFeatureFilter();
@@ -936,10 +1024,7 @@
           const newStreetId = streets[officialName];
           if (newStreetId) {
             currentStreetId = newStreetId;
-            if (streetNameSpan && currentStreetDiv) {
-              streetNameSpan.textContent = officialName;
-              currentStreetDiv.style.display = 'block';
-            }
+            showCurrentStreet(officialName);
           }
 
           clearFixStreetState(); // repaints via applyFeatureFilter
@@ -961,89 +1046,6 @@
           clearFixStreetState();
         }
       });
-    }
-
-    // Returns { segment, distance } with distance in approximate meters, or null.
-    function findNearestSegment(feature, streetName, matchName) {
-      const point = { x: feature.lon, y: feature.lat };
-      // WGS84 → meters scaling around the feature's latitude; plenty accurate
-      // for comparing segments within a loaded area a few km across.
-      const M_PER_DEG_LAT = 111320;
-      const mPerDegLon = M_PER_DEG_LAT * Math.cos(feature.lat * Math.PI / 180);
-      const allSegments = wmeSDK.DataModel.Segments.getAll()
-        .filter(segment => !NON_ADDRESSABLE_ROAD_TYPES.has(segment.roadType));
-      let candidateSegments = allSegments;
-
-      if (matchName) {
-        const matchingStreetIds = wmeSDK.DataModel.Streets.getAll()
-          .filter(street => street.name?.toLowerCase() === streetName.toLowerCase())
-          .map(street => street.id);
-
-        if (matchingStreetIds.length === 0) {
-          return null;
-        }
-
-        candidateSegments = allSegments.filter(segment => {
-          const primaryMatch = matchingStreetIds.includes(segment.primaryStreetId);
-          const altMatch = (segment.alternateStreetIds || []).some(id => matchingStreetIds.includes(id));
-          return primaryMatch || altMatch;
-        });
-      }
-
-      if (candidateSegments.length === 0) {
-        return null;
-      }
-
-      let nearestSegment = null;
-      let minDistance = Infinity;
-
-      candidateSegments.forEach(segment => {
-        const coords = segment.geometry?.coordinates;
-        if (!Array.isArray(coords) || coords.length < 2) return;
-        const distance = pointToLineDistance(point, coords, mPerDegLon, M_PER_DEG_LAT);
-        if (distance < minDistance) {
-          minDistance = distance;
-          nearestSegment = segment;
-        }
-      });
-
-      return nearestSegment ? { segment: nearestSegment, distance: minDistance } : null;
-    }
-
-    // sx/sy scale lon/lat into meters so the returned distance is in meters.
-    function pointToLineDistance(point, coords, sx = 1, sy = 1) {
-      const px = point.x * sx;
-      const py = point.y * sy;
-      let minDist = Infinity;
-      for (let i = 0; i < coords.length - 1; i++) {
-        const [x1, y1] = coords[i];
-        const [x2, y2] = coords[i + 1];
-        const dist = pointToSegmentDistance(px, py, x1 * sx, y1 * sy, x2 * sx, y2 * sy);
-        if (dist < minDist) minDist = dist;
-      }
-      return minDist;
-    }
-
-    function pointToSegmentDistance(px, py, x1, y1, x2, y2) {
-      const dx = x2 - x1;
-      const dy = y2 - y1;
-      const lengthSquared = dx * dx + dy * dy;
-
-      if (lengthSquared === 0) {
-        const dpx = px - x1;
-        const dpy = py - y1;
-        return Math.sqrt(dpx * dpx + dpy * dpy);
-      }
-
-      let t = ((px - x1) * dx + (py - y1) * dy) / lengthSquared;
-      t = Math.max(0, Math.min(1, t));
-
-      const closestX = x1 + t * dx;
-      const closestY = y1 + t * dy;
-
-      const dpx = px - closestX;
-      const dpy = py - closestY;
-      return Math.sqrt(dpx * dpx + dpy * dpy);
     }
 
     const loading = document.createElement('div');
@@ -1078,11 +1080,7 @@
             <wz-checkbox id="qhnsl-navpoints">Show HN NavPoints</wz-checkbox>
             <span style="font-size:12px;">Buffer (m): <input id="qhnsl-buffer" type="number" min="0" step="50" style="width:80px;margin-left:6px"></span>
           </div>
-          <div id="hn-status" style="margin-top:10px;font-size:12px;color:#666;line-height:1.4;">
-            <b>Instructions</b><br/>
-            1) Select a segment • 2) Click "Load selected street" • 3) <b>Click house numbers on map to add them</b><br/>
-            Green = selected street • Orange = other streets • Red = possible wrong HN • Faded = already in WME
-          </div>
+          <div id="hn-status" style="margin-top:10px;font-size:12px;color:#666;line-height:1.4;">${INSTRUCTIONS_HTML}</div>
         </div>
       `;
 
@@ -1167,7 +1165,7 @@
         lastFeatures = [];
         streetAnalysisDiv.style.display = 'none';
 
-        await updateLayer(statusDiv, myLoadId).catch(err => console.warn('SL-HN updateLayer:', err));
+        await updateLayer(statusDiv, myLoadId).catch(err => console.warn('[SL-HN] updateLayer:', err));
 
         // Skip post-load side effects if user clicked Clear (or another Load) mid-fetch
         if (myLoadId === currentLoadId) {
@@ -1199,11 +1197,9 @@
         streetNames = {};
         currentStreetId = null;
         lastFeatures = [];
-        currentStreetDiv.style.display = 'none';
+        hideCurrentStreet();
         streetAnalysisDiv.style.display = 'none';
-        statusDiv.innerHTML = `<b>Instructions</b><br/>
-          1) Select a segment • 2) Click "Load selected street" • 3) <b>Click house numbers on map to add them</b><br/>
-          Green = selected street • Orange = other streets • Red = possible wrong HN • Faded = already in WME`;
+        statusDiv.innerHTML = INSTRUCTIONS_HTML;
       }
 
       btnClear.addEventListener('click', clearLayer);
@@ -1230,6 +1226,16 @@
         lastSdkFeatureIds = visibleSdk.map(f => f.id);
       };
 
+      // Single source of truth for a circle's processed/conflict state, shared
+      // by the initial load and every later recalculation. Processed = saved in
+      // WME (entry) OR added this session but not saved yet.
+      function computeFeatureState(streetId, hn, x, y, selectionHNMap) {
+        const entry = selectionHNMap.get(streetId);
+        const processed = entry?.set.has(hn) === true || sessionAddedKeys.has(featKey(streetId, hn));
+        const conflict = !processed && hasConflict(hn, x, y, entry);
+        return { processed, conflict };
+      }
+
       async function recalculateFeatureStates() {
         if (!lastFeatures.length) return;
 
@@ -1239,11 +1245,7 @@
           const { number: hn, street: streetId, eX, eY } = feat;
           if (!hn || !streetId) return;
 
-          const entry = selectionHNMap.get(streetId);
-          // Saved state (entry) OR an HN we added this session that isn't saved yet.
-          const processed = entry?.set.has(hn) === true || sessionAddedKeys.has(featKey(streetId, hn));
-          const conflict = !processed && hasConflict(hn, eX, eY, entry);
-
+          const { processed, conflict } = computeFeatureState(streetId, hn, eX, eY, selectionHNMap);
           feat.processed = processed;
           feat.conflict = conflict;
         });
@@ -1510,7 +1512,7 @@
         { shortcutId: 'qhnsl-clear', shortcutKeys: 'AS+k', description: 'SL-HN: Clear',                callback: clearLayer }
       ].forEach(spec => {
         try { wmeSDK.Shortcuts.createShortcut(spec); }
-        catch (e) { console.warn('SL-HN: failed to register shortcut', spec.shortcutId, e); }
+        catch (e) { console.warn('[SL-HN] failed to register shortcut', spec.shortcutId, e); }
       });
 
       function updateLayer(statusDiv, loadId) {
@@ -1597,9 +1599,7 @@
                   streetNames[streetId] = streetName;
                 }
 
-                const entry = selectionHNMap.get(streetId);
-                const processed = entry?.set.has(hn) === true || sessionAddedKeys.has(featKey(streetId, hn));
-                const conflict = !processed && hasConflict(hn, e, n, entry);
+                const { processed, conflict } = computeFeatureState(streetId, hn, e, n, selectionHNMap);
 
                 features.push({
                   number: hn,
@@ -1618,19 +1618,8 @@
                 (seg.alternateStreetIds || []).forEach(id => allStreetIds.add(id));
                 if (seg.primaryStreetId) allStreetIds.add(seg.primaryStreetId);
               });
-              const selectedNames = [...allStreetIds]
-                .map(id => wmeSDK.DataModel.Streets.getById({ streetId: id })?.name)
-                .filter(Boolean);
 
-              let best = null, bestCount = -1;
-              selectedNames.forEach(name => {
-                const sid = streets[name];
-                if (!sid) return;
-                const count = features.reduce((n,f)=> n + (f.street === sid ? 1 : 0), 0);
-                if (count > bestCount) { best = sid; bestCount = count; }
-              });
-
-              currentStreetId = best || null;
+              currentStreetId = findBestMatchingStreetId(allStreetIds, features);
 
               if (!features.length) {
                 loading.style.display = 'none';
@@ -1642,10 +1631,9 @@
               lastFeatures = features;
 
               if (currentStreetId && streetNames[currentStreetId]) {
-                streetNameSpan.textContent = streetNames[currentStreetId];
-                currentStreetDiv.style.display = 'block';
+                showCurrentStreet(streetNames[currentStreetId]);
               } else {
-                currentStreetDiv.style.display = 'none';
+                hideCurrentStreet();
               }
 
               if (lastSdkFeatureIds.length) {
@@ -1661,7 +1649,7 @@
               resolve();
             })
             .catch(err => {
-              console.error('[Quick HN Importer] API error:', err);
+              console.error('[SL-HN] API error:', err);
               loading.style.display = 'none';
               if (loadId === currentLoadId) {
                 statusDiv.textContent = 'Error fetching address data. See console.';
