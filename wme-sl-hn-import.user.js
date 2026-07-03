@@ -1308,6 +1308,47 @@
 
         wmeSDK.Events.on({ eventName: 'wme-map-data-loaded', eventHandler: refresh });
 
+        // The high-level HN events don't fire on undo/redo of an unsaved add,
+        // but the data-model events do: undo removes the HN object from the
+        // model, redo re-adds it with the same id. Only ids we created (in
+        // hnIdToAddedKey) are touched, so unrelated model churn is ignored.
+        try {
+          wmeSDK.Events.trackDataModelEvents({ dataModelName: 'segmentHouseNumbers' });
+          wmeSDK.Events.on({
+            eventName: 'wme-data-model-objects-removed',
+            eventHandler: (payload) => {
+              if (payload?.dataModelName !== 'segmentHouseNumbers') return;
+              let changed = false;
+              (payload.objectIds || []).forEach(id => {
+                const key = hnIdToAddedKey.get(id);
+                if (key != null && sessionAddedKeys.has(key)) {
+                  sessionAddedKeys.delete(key); // keep the mapping for a possible redo
+                  changed = true;
+                }
+              });
+              if (changed) refresh();
+            }
+          });
+          wmeSDK.Events.on({
+            eventName: 'wme-data-model-objects-added',
+            eventHandler: (payload) => {
+              if (payload?.dataModelName !== 'segmentHouseNumbers') return;
+              let changed = false;
+              (payload.objectIds || []).forEach(id => {
+                const key = hnIdToAddedKey.get(id);
+                if (key != null && !sessionAddedKeys.has(key)) {
+                  sessionAddedKeys.add(key);
+                  deletedHnIds.delete(id);
+                  changed = true;
+                }
+              });
+              if (changed) refresh();
+            }
+          });
+        } catch (err) {
+          console.warn('[SL-HN] could not track HN data-model events:', err);
+        }
+
         // A successful save is the reconciliation point: fetchHouseNumbers now
         // reflects reality, and saved HNs get new permanent ids, so the session
         // overlays (keyed by pre-save ids) would only drift from here — drop them.
