@@ -655,9 +655,17 @@
           e.stopPropagation();
           const streetName = btn.getAttribute('data-street');
 
-          // Check if this street is already set on the current segment
-          const currentWmeStreet = getWmeStreetName();
-          if (currentWmeStreet === streetName) {
+          // Skip only when EVERY selected segment already carries this name —
+          // the rename applies to the whole selection, so a mixed selection
+          // whose first segment happens to be correct must still proceed.
+          const selectedSegments = getSelectedSegments();
+          const allAlreadySet = selectedSegments.length > 0 && selectedSegments.every(seg => {
+            const street = seg.primaryStreetId
+              ? wmeSDK.DataModel.Streets.getById({ streetId: seg.primaryStreetId })
+              : null;
+            return street?.name === streetName;
+          });
+          if (allAlreadySet) {
             toast('Street name already set', 'info');
             return;
           }
