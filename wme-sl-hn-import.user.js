@@ -54,6 +54,7 @@
   // EProstor API configuration
   const EPROSTOR_API = 'https://ipi.eprostor.gov.si/wfs-si-gurs-rn/ogc/features/collections/SI.GURS.RN:REGISTER_NASLOVOV/items';
   const EPROSTOR_LIMIT = 1000;
+  const EPROSTOR_MAX_PAGES = 30; // hard cap: 30 pages × 1000 addresses per load
 
   // Common Slovenian street name abbreviations
   const ABBREVIATIONS = {
@@ -212,13 +213,25 @@
     return `E>=${minE} AND E<=${maxE} AND N>=${minN} AND N<=${maxN} AND ST_STANOVANJA IS NULL`;
   }
 
-  // Fetch addresses from EProstor API with pagination
-  function fetchAddresses(minE, minN, maxE, maxN) {
+  // Fetch addresses from EProstor API with pagination. shouldAbort (optional)
+  // is checked between pages so a Clear / newer Load stops the request chain.
+  function fetchAddresses(minE, minN, maxE, maxN, shouldAbort) {
     return new Promise((resolve, reject) => {
       const allFeatures = [];
       let startIndex = 0;
+      let pageCount = 0;
 
       function fetchPage() {
+        if (typeof shouldAbort === 'function' && shouldAbort()) {
+          resolve(allFeatures); // caller discards stale results anyway
+          return;
+        }
+        if (++pageCount > EPROSTOR_MAX_PAGES) {
+          console.warn(`[SL-HN] EProstor result truncated at ${EPROSTOR_MAX_PAGES} pages — reduce the buffer`);
+          toast('Too many addresses in area — result truncated, reduce the buffer', 'warning');
+          resolve(allFeatures);
+          return;
+        }
         const filter = buildCqlFilter(minE, minN, maxE, maxN);
         const url = EPROSTOR_API +
           '?f=application/json' +
@@ -246,10 +259,15 @@
 
               allFeatures.push(...data.features);
 
-              // Check if there are more pages
+              // Check if there are more pages: trust numberMatched when the
+              // server provides it, otherwise assume a full page means more.
               const returned = data.numberReturned || data.features.length;
-              if (returned >= EPROSTOR_LIMIT) {
-                startIndex += EPROSTOR_LIMIT;
+              const total = typeof data.numberMatched === 'number' ? data.numberMatched : null;
+              const hasMore = total != null
+                ? startIndex + returned < total
+                : returned >= EPROSTOR_LIMIT;
+              if (hasMore && returned > 0) {
+                startIndex += returned;
                 fetchPage();
               } else {
                 resolve(allFeatures);
@@ -1119,6 +1137,12 @@
 
       async function loadSelectedStreet() {
         if (isLoading) return;
+        // Validate before wiping anything — an accidental Alt+Shift+L with no
+        // selection must not destroy the currently loaded street.
+        if (getSelectedSegments().length === 0) {
+          toast('Select a segment first.', 'warning');
+          return;
+        }
         clearFixStreetState();
         isLoading = true;
         const myLoadId = ++currentLoadId;
@@ -1441,8 +1465,12 @@
           const on = !isChecked(chkNavPoints);
           setChecked(chkNavPoints, on);
           LS.setNavPoints(on);
-          if (on) scheduleRender();
-          else clearNavLayer();
+          if (on) {
+            scheduleRender();
+          } else {
+            currentRenderId++; // invalidate any in-flight render so it can't re-add features
+            clearNavLayer();
+          }
         });
 
         if (LS.getNavPoints()) scheduleRender();
@@ -1522,7 +1550,7 @@
           const maxN = Math.ceil(tr[1]  + buffer);
 
           Promise.all([
-            fetchAddresses(minE, minN, maxE, maxN),
+            fetchAddresses(minE, minN, maxE, maxN, () => loadId !== currentLoadId),
             getVisibleHNsByStreet()
           ])
             .then(([apiFeatures, selectionHNMap]) => {
