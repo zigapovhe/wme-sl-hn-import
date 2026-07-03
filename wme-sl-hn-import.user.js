@@ -327,7 +327,7 @@
       : `⚠️ Official street <b>"${escapedOfficial}"</b> not found in WME`;
 
     const addAnywayLabel = farInfo
-      ? `Add to "${escapedOfficial}" ${Math.round(farInfo.farDistance)} m away`
+      ? `Add to "${escapedOfficial}" ${Math.round(farInfo.farDistance)} m away anyway`
       : (nearestStreetName
         ? `Add to "${escapeHtml(nearestStreetName)}" anyway`
         : 'Add to unnamed segment anyway');
@@ -1271,6 +1271,11 @@
               deletedHnIds.delete(hnId);
               if (pendingAddKey != null) {
                 hnIdToAddedKey.set(hnId, pendingAddKey);
+                sessionAddedKeys.add(pendingAddKey);
+              } else {
+                // Redo (or undone delete) of a session add: restore its overlay.
+                const key = hnIdToAddedKey.get(hnId);
+                if (key != null) sessionAddedKeys.add(key);
               }
             }
             pendingAddKey = null;
@@ -1286,10 +1291,11 @@
             const hnId = payload?.houseNumberId;
             if (hnId != null) {
               deletedHnIds.add(hnId);
+              // Un-fade the circle, but KEEP the id → key mapping so a redo of
+              // this add (same id) can restore the overlay.
               const key = hnIdToAddedKey.get(hnId);
               if (key != null) {
                 sessionAddedKeys.delete(key);
-                hnIdToAddedKey.delete(hnId);
               }
             }
             refresh();
