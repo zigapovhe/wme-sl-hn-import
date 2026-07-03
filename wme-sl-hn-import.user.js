@@ -1265,15 +1265,15 @@
         wmeSDK.Events.on({
           eventName: 'wme-house-number-added',
           eventHandler: (payload) => {
-            const hnId = payload?.houseNumberId;
+            const hnId = payload?.houseNumberId != null ? String(payload.houseNumberId) : null;
             if (hnId != null) {
-              // An undone delete re-adds the HN with the same id — stop skipping it.
+              // This id exists again — it must no longer be treated as deleted.
               deletedHnIds.delete(hnId);
               if (pendingAddKey != null) {
                 hnIdToAddedKey.set(hnId, pendingAddKey);
                 sessionAddedKeys.add(pendingAddKey);
               } else {
-                // Redo (or undone delete) of a session add: restore its overlay.
+                // Redo of a session add: restore its overlay.
                 const key = hnIdToAddedKey.get(hnId);
                 if (key != null) sessionAddedKeys.add(key);
               }
@@ -1288,8 +1288,10 @@
         wmeSDK.Events.on({
           eventName: 'wme-house-number-deleted',
           eventHandler: (payload) => {
-            const hnId = payload?.houseNumberId;
+            const hnId = payload?.houseNumberId != null ? String(payload.houseNumberId) : null;
             if (hnId != null) {
+              // Known gap: undoing the delete of a SAVED HN fires no event at
+              // all, so this entry can go stale until save reconciles it.
               deletedHnIds.add(hnId);
               // Un-fade the circle, but KEEP the id → key mapping so a redo of
               // this add (same id) can restore the overlay.
@@ -1319,8 +1321,8 @@
             eventHandler: (payload) => {
               if (payload?.dataModelName !== 'segmentHouseNumbers') return;
               let changed = false;
-              (payload.objectIds || []).forEach(id => {
-                const key = hnIdToAddedKey.get(id);
+              (payload.objectIds || []).forEach(rawId => {
+                const key = hnIdToAddedKey.get(String(rawId));
                 if (key != null && sessionAddedKeys.has(key)) {
                   sessionAddedKeys.delete(key); // keep the mapping for a possible redo
                   changed = true;
@@ -1334,7 +1336,8 @@
             eventHandler: (payload) => {
               if (payload?.dataModelName !== 'segmentHouseNumbers') return;
               let changed = false;
-              (payload.objectIds || []).forEach(id => {
+              (payload.objectIds || []).forEach(rawId => {
+                const id = String(rawId);
                 const key = hnIdToAddedKey.get(id);
                 if (key != null && !sessionAddedKeys.has(key)) {
                   sessionAddedKeys.add(key);
@@ -1724,7 +1727,7 @@
 
         allHns.forEach(hn => {
           // Skip HNs deleted this session: the model still returns them until save.
-          if (deletedHnIds.has(hn.id)) return;
+          if (deletedHnIds.has(String(hn.id))) return;
           const seg = wmeSDK.DataModel.Segments.getById({ segmentId: hn.segmentId });
           if (!seg) return;
 
