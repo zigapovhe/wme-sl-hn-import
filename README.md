@@ -115,6 +115,11 @@ Click a house number whose official street name is missing from WME (or exists o
 - Circles hidden by the filters or by zooming out are no longer clickable
 - Unsaved adds/deletes are tracked more reliably and reconciled when you save
 
+### v2.3.1
+
+- Renaming now also works for segments saved without any address — the city is borrowed from the rest of the selection (or from WME's best guess for the area)
+- The far-street dialog says "about 448 m" instead of "~448 m", which was easy to misread as a negative distance
+
 ---
 
 ## ⚠️ Notes & Gotchas

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WME Quick HN Importer - Slovenia
 // @namespace    https://github.com/zigapovhe/wme-sl-hn-import
-// @version      2.3.0
+// @version      2.3.1
 // @description  Quickly add Slovenian house numbers with clickable overlays
 // @author       ThatByte
 // @downloadURL  https://raw.githubusercontent.com/zigapovhe/wme-sl-hn-import/main/wme-sl-hn-import.user.js
@@ -323,7 +323,7 @@
 
     const escapedOfficial = escapeHtml(officialName);
     const headerHtml = farInfo
-      ? `⚠️ Official street <b>"${escapedOfficial}"</b> is ~${Math.round(farInfo.farDistance)} m away — the nearest segment (${Math.round(farInfo.nearestDistance)} m) has a different name`
+      ? `⚠️ Official street <b>"${escapedOfficial}"</b> is about ${Math.round(farInfo.farDistance)} m away — the nearest segment (${Math.round(farInfo.nearestDistance)} m) has a different name`
       : `⚠️ Official street <b>"${escapedOfficial}"</b> not found in WME`;
 
     const addAnywayLabel = farInfo
