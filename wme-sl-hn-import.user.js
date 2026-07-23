@@ -363,6 +363,34 @@
     fixStreetDialogEl = div;
   }
 
+  // City for a segment that has no street of its own (e.g. a freshly drawn road
+  // saved without an address): borrow a real city from another selected segment,
+  // else WME's top city, else the empty "no city" entry for the current country.
+  function resolveFallbackCityId(segments) {
+    // City id borrowed from the selection but not confirmed as a real city
+    let borrowedCityId = null;
+    for (const seg of segments) {
+      const street = seg.primaryStreetId
+        ? wmeSDK.DataModel.Streets.getById({ streetId: seg.primaryStreetId })
+        : null;
+      if (!street?.cityId) continue;
+      const city = wmeSDK.DataModel.Cities.getById({ cityId: street.cityId });
+      if (city && !city.isEmpty) return street.cityId;
+      if (borrowedCityId === null) borrowedCityId = street.cityId;
+    }
+
+    const topCity = wmeSDK.DataModel.Cities.getTopCity();
+    if (topCity && !topCity.isEmpty) return topCity.id;
+    if (borrowedCityId !== null) return borrowedCityId;
+    if (topCity) return topCity.id; // empty top city beats creating one
+
+    const countryId = wmeSDK.DataModel.Countries.getTopCountry()?.id;
+    if (!countryId) return null;
+    const emptyCity = wmeSDK.DataModel.Cities.getCity({ cityName: '', countryId })
+      || wmeSDK.DataModel.Cities.addCity({ cityName: '', countryId });
+    return emptyCity?.id ?? null;
+  }
+
   // Rename all currently selected segments to the given street name via WME SDK.
   // Returns the number of segments successfully renamed.
   function updateSegmentStreetName(newStreetName, onSuccess) {
@@ -374,6 +402,7 @@
 
     let renamed = 0;
     let failed = 0;
+    let fallbackCityId; // resolved lazily when first needed
 
     selectedSegments.forEach(segment => {
       try {
@@ -381,7 +410,14 @@
         const currentStreet = segment.primaryStreetId
           ? wmeSDK.DataModel.Streets.getById({ streetId: segment.primaryStreetId })
           : null;
-        const cityId = currentStreet?.cityId;
+        let cityId = currentStreet?.cityId;
+
+        // Segments saved without any address have no street to take the city
+        // from — fall back to a city borrowed from the rest of the selection
+        if (!cityId) {
+          if (fallbackCityId === undefined) fallbackCityId = resolveFallbackCityId(selectedSegments);
+          cityId = fallbackCityId;
+        }
 
         if (!cityId) {
           console.warn('[SL-HN] Segment has no resolvable city, skipping:', segment.id);
