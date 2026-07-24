@@ -36,6 +36,8 @@ No manual typing is needed — just click.
 - Show only missing house numbers  
 - Show only the selected street  
 - Show street names on the map (on by default)  
+- Show WME HN audit — flags house numbers in WME with no eProstor counterpart (off by default)  
+- Auto-load addresses when selecting a street (off by default)  
 - Adjust the buffer distance (default: 500 m)
 
 ## 📍 HN NavPoints Overlay
