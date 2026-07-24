@@ -88,7 +88,9 @@
     getStreetNames()  { return localStorage.getItem('qhnsl-street-names') !== '0'; }, // default on
     setStreetNames(v) { localStorage.setItem('qhnsl-street-names', v ? '1' : '0'); },
     getAudit()        { return localStorage.getItem('qhnsl-audit') === '1'; },
-    setAudit(v)       { localStorage.setItem('qhnsl-audit', v ? '1' : '0'); }
+    setAudit(v)       { localStorage.setItem('qhnsl-audit', v ? '1' : '0'); },
+    getAutoLoad()     { return localStorage.getItem('qhnsl-autoload') === '1'; },
+    setAutoLoad(v)    { localStorage.setItem('qhnsl-autoload', v ? '1' : '0'); }
   };
 
   const toast = (msg, type = 'info') => {
@@ -563,6 +565,10 @@
 
   function init() {
     let currentStreetId = null;
+    // Last street auto-load fetched for. Tracked separately from currentStreetId,
+    // which stays null when WME's spelling doesn't match eProstor's — without this
+    // the dedup guard would miss and re-fetch on every selection change.
+    let lastAutoLoadedKey = null;
     let streetNames = {};
     let streets = {};
     let lastFeatures = [];
@@ -1280,6 +1286,7 @@
             <wz-checkbox id="qhnsl-selected-only">Selected street only</wz-checkbox>
             <wz-checkbox id="qhnsl-street-names">Show street names</wz-checkbox>
             <wz-checkbox id="qhnsl-audit">Show WME HN audit</wz-checkbox>
+            <wz-checkbox id="qhnsl-autoload">Auto-load on street select</wz-checkbox>
             <wz-checkbox id="qhnsl-navpoints">Show HN NavPoints</wz-checkbox>
             <span style="font-size:12px;">Buffer (m): <input id="qhnsl-buffer" type="number" min="0" step="50" style="width:80px;margin-left:6px"></span>
           </div>
@@ -1295,6 +1302,7 @@
       chkSelectedOnly = tabPane.querySelector('#qhnsl-selected-only');
       const chkStreetNames = tabPane.querySelector('#qhnsl-street-names');
       const chkAudit = tabPane.querySelector('#qhnsl-audit');
+      const chkAutoLoad = tabPane.querySelector('#qhnsl-autoload');
       const chkNavPoints = tabPane.querySelector('#qhnsl-navpoints');
       const bufferEl   = tabPane.querySelector('#qhnsl-buffer');
       const statusDiv  = tabPane.querySelector('#hn-status');
@@ -1318,6 +1326,7 @@
       }
       setChecked(chkStreetNames, userWantsStreetNames);
       setChecked(chkAudit, userWantsAudit);
+      setChecked(chkAutoLoad, LS.getAutoLoad());
       setChecked(chkNavPoints, LS.getNavPoints());
 
       bufferEl.addEventListener('change', () => {
@@ -1357,6 +1366,12 @@
         LS.setAudit(on);
         updateLayerVisibility();
         renderAuditFindings();
+      });
+
+      chkAutoLoad.addEventListener('click', () => {
+        const on = !isChecked(chkAutoLoad);
+        setChecked(chkAutoLoad, on);
+        LS.setAutoLoad(on);
       });
 
       chkSelectedOnly.addEventListener('click', () => {
@@ -1417,6 +1432,44 @@
 
       btnLoad.addEventListener('click', loadSelectedStreet);
 
+      // Auto-load fires on selection change, never on pan: updateLayer derives its
+      // bbox from the selected segment, and auto-fetching per pan would hammer the
+      // eProstor API far harder than the manual flow.
+      // Defined here (not next to onSelectionChanged) because loadSelectedStreet
+      // lives in this closure.
+      let autoLoadTimer = null;
+      function maybeAutoLoad() {
+        if (!LS.getAutoLoad() || isLoading) return;
+
+        const selected = getSelectedSegments();
+        if (selected.length === 0) return;
+
+        const primaryStreetId = selected[0].primaryStreetId;
+        if (!primaryStreetId) return;
+
+        const street = wmeSDK.DataModel.Streets.getById({ streetId: primaryStreetId });
+        const name = street?.name;
+        if (!name) return;
+
+        // Never re-fetch the street already loaded. Two guards: currentStreetId
+        // covers the normal case, lastAutoLoadedKey covers streets whose WME
+        // spelling doesn't match eProstor's (where currentStreetId stays null).
+        const key = normalizeStreetName(name);
+        if (currentStreetId && key === currentStreetId) return;
+        if (key === lastAutoLoadedKey) return;
+
+        // Debounce: click-dragging across segments must fire one fetch, not many.
+        if (autoLoadTimer) clearTimeout(autoLoadTimer);
+        autoLoadTimer = setTimeout(() => {
+          autoLoadTimer = null;
+          if (isLoading) return;
+          lastAutoLoadedKey = key;
+          loadSelectedStreet().catch(err => console.warn('[SL-HN] auto-load failed:', err));
+        }, 400);
+      }
+
+      wmeSDK.Events.on({ eventName: 'wme-selection-changed', eventHandler: maybeAutoLoad });
+
       function clearLayer() {
         clearFixStreetState();
         currentLoadId++; // invalidate any in-flight load so its results are discarded
@@ -1434,6 +1487,7 @@
         }
         lastAuditFindings = [];
         if (auditSummaryDiv) auditSummaryDiv.style.display = 'none';
+        lastAutoLoadedKey = null; // Clear means "start over": allow re-fetching the same street
         userWantsLayerVisible = false;
         updateLayerVisibility(); // keeps lastComputedVisibility in sync (a direct setLayerVisibility here left it stale)
         setChecked(chkVis, false);
