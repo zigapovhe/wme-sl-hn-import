@@ -35,6 +35,7 @@ No manual typing is needed — just click.
 - Toggle the layer visibility  
 - Show only missing house numbers  
 - Show only the selected street  
+- Show street names on the map (on by default)  
 - Adjust the buffer distance (default: 500 m)
 
 ## 📍 HN NavPoints Overlay

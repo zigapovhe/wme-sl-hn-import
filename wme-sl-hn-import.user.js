@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WME Quick HN Importer - Slovenia
 // @namespace    https://github.com/zigapovhe/wme-sl-hn-import
-// @version      2.3.1
+// @version      2.4.0
 // @description  Quickly add Slovenian house numbers with clickable overlays
 // @author       ThatByte
 // @downloadURL  https://raw.githubusercontent.com/zigapovhe/wme-sl-hn-import/main/wme-sl-hn-import.user.js
@@ -34,6 +34,7 @@
 
   let wmeSDK;
   const SDK_LAYER_NAME = 'qhnsl-sdk';
+  const SDK_STREETNAMES_LAYER_NAME = 'qhnsl-streetnames';
   const SDK_NAVPOINTS_LAYER_NAME = 'qhnsl-navpoints';
 
   const MAX_CLICK_DISTANCE_PX = 25;
@@ -77,7 +78,9 @@
     getSelectedOnly() { return localStorage.getItem('qhnsl-selected-only') === '1'; },
     setSelectedOnly(v){ localStorage.setItem('qhnsl-selected-only', v ? '1' : '0'); },
     getNavPoints()    { return localStorage.getItem('qhnsl-navpoints') === '1'; },
-    setNavPoints(v)   { localStorage.setItem('qhnsl-navpoints', v ? '1' : '0'); }
+    setNavPoints(v)   { localStorage.setItem('qhnsl-navpoints', v ? '1' : '0'); },
+    getStreetNames()  { return localStorage.getItem('qhnsl-street-names') !== '0'; }, // default on
+    setStreetNames(v) { localStorage.setItem('qhnsl-street-names', v ? '1' : '0'); }
   };
 
   const toast = (msg, type = 'info') => {
@@ -557,9 +560,11 @@
     let lastFeatures = [];
     let fixStreetHighlightStreetId = null; // official street ID whose HNs are highlighted during fix-street flow
     let lastSdkFeatureIds = [];
+    let lastStreetLabelIds = [];
     let isLoading = false;
     let currentLoadId = 0;
     let userWantsLayerVisible = false;
+    let userWantsStreetNames = LS.getStreetNames();
     let streetNameSpan = null;
     let currentStreetDiv = null;
     let streetAnalysisDiv = null;
@@ -624,19 +629,85 @@
     });
     wmeSDK.Map.setLayerVisibility({ layerName: SDK_LAYER_NAME, visibility: false });
 
+    // Label-only layer: one reference street name floated over each street's
+    // cluster of house-number points. Shares the HN layer's zoom/toggle gate.
+    wmeSDK.Map.addLayer({
+      layerName: SDK_STREETNAMES_LAYER_NAME,
+      zIndexing: true, // required: without it setLayerZIndex below has no effect
+      styleContext: {
+        getLabel: ({ feature }) => String(feature.properties.name ?? '')
+      },
+      styleRules: [{
+        style: {
+          pointRadius: 0,
+          fillOpacity: 0,
+          strokeOpacity: 0,
+          label: '${getLabel}',
+          fontColor: '#1a3d7c',
+          fontSize: '13px',
+          fontWeight: 'bold',
+          labelOutlineColor: '#ffffff',
+          labelOutlineWidth: 3
+        }
+      }]
+    });
+    wmeSDK.Map.setLayerVisibility({ layerName: SDK_STREETNAMES_LAYER_NAME, visibility: false });
+    // Baseline z-index: above WME's own labels but below the segment-interaction
+    // layer, so segments stay clickable even if the click-through step below never
+    // succeeds.
+    try { wmeSDK.Map.setLayerZIndex({ layerName: SDK_STREETNAMES_LAYER_NAME, zIndex: 1000 }); } catch (_) {}
+
+    // The label layer is display-only (dot clicks go through wme-map-mouse-click,
+    // not the layer). Mark its DOM node pointer-events:none so it never swallows
+    // segment clicks, then — and only then — lift it above every other overlay
+    // (WME Toolbox speed limits, etc.). Raising the z-index before neutralizing
+    // pointer events would block segment selection across the whole map.
+    //
+    // OpenLayers recomputes every layer's z-index whenever a layer is added or
+    // removed, so a script loading after us silently drops our labels back down.
+    // Re-assert on each redraw/pan/zoom instead of setting this once.
+    let labelLayerDiv = null;
+    function liftLabelLayer() {
+      try {
+        if (!labelLayerDiv) {
+          // W.map is a WMEMap wrapper; the OpenLayers map (with .layers) is behind getOLMap().
+          const wmeMap = (unsafeWindow || window).W?.map;
+          const layers = wmeMap?.getOLMap?.()?.layers;
+          const layer = layers?.find(l => [l?.name, l?.uniqueName].some(
+            n => typeof n === 'string' && n.includes(SDK_STREETNAMES_LAYER_NAME)));
+          if (!layer?.div) return;
+          labelLayerDiv = layer.div;
+        }
+        labelLayerDiv.style.pointerEvents = 'none';
+        wmeSDK.Map.setLayerZIndex({ layerName: SDK_STREETNAMES_LAYER_NAME, zIndex: 10000 });
+      } catch (_) {}
+    }
+    liftLabelLayer();
+
     let lastComputedVisibility = false;
+    let lastComputedStreetVis = false;
     function updateLayerVisibility() {
       const currentZoom = wmeSDK.Map.getZoomLevel();
       const shouldBeVisible = userWantsLayerVisible && currentZoom >= 18;
+      // Street names ride the HN layer's gate, plus their own toggle.
+      const streetShouldBeVisible = shouldBeVisible && userWantsStreetNames;
 
-      if (shouldBeVisible === lastComputedVisibility) return;
-      lastComputedVisibility = shouldBeVisible;
-
-      wmeSDK.Map.setLayerVisibility({ layerName: SDK_LAYER_NAME, visibility: shouldBeVisible });
-
-      if (userWantsLayerVisible && !shouldBeVisible && lastFeatures.length > 0) {
-        toast('Zoom in to level 18+ to see house numbers', 'info');
+      if (shouldBeVisible !== lastComputedVisibility) {
+        lastComputedVisibility = shouldBeVisible;
+        wmeSDK.Map.setLayerVisibility({ layerName: SDK_LAYER_NAME, visibility: shouldBeVisible });
+        if (userWantsLayerVisible && !shouldBeVisible && lastFeatures.length > 0) {
+          toast('Zoom in to level 18+ to see house numbers', 'info');
+        }
       }
+
+      if (streetShouldBeVisible !== lastComputedStreetVis) {
+        lastComputedStreetVis = streetShouldBeVisible;
+        wmeSDK.Map.setLayerVisibility({ layerName: SDK_STREETNAMES_LAYER_NAME, visibility: streetShouldBeVisible });
+      }
+
+      // Runs on every pan/zoom: reclaims the top spot if another script's layer
+      // load reshuffled z-indexes since the last time we looked.
+      if (streetShouldBeVisible) liftLabelLayer();
     }
 
     wmeSDK.Events.on({ eventName: 'wme-map-zoom-changed', eventHandler: updateLayerVisibility });
@@ -1113,6 +1184,7 @@
             <wz-checkbox id="hn-toggle">Show layer</wz-checkbox>
             <wz-checkbox id="qhnsl-missing">Show only missing</wz-checkbox>
             <wz-checkbox id="qhnsl-selected-only">Selected street only</wz-checkbox>
+            <wz-checkbox id="qhnsl-street-names">Show street names</wz-checkbox>
             <wz-checkbox id="qhnsl-navpoints">Show HN NavPoints</wz-checkbox>
             <span style="font-size:12px;">Buffer (m): <input id="qhnsl-buffer" type="number" min="0" step="50" style="width:80px;margin-left:6px"></span>
           </div>
@@ -1126,6 +1198,7 @@
       const chkVis = tabPane.querySelector('#hn-toggle');
       chkMissing = tabPane.querySelector('#qhnsl-missing');
       chkSelectedOnly = tabPane.querySelector('#qhnsl-selected-only');
+      const chkStreetNames = tabPane.querySelector('#qhnsl-street-names');
       const chkNavPoints = tabPane.querySelector('#qhnsl-navpoints');
       const bufferEl   = tabPane.querySelector('#qhnsl-buffer');
       const statusDiv  = tabPane.querySelector('#hn-status');
@@ -1146,6 +1219,7 @@
       if (LS.getSelectedOnly()) {
         setChecked(chkSelectedOnly, true);
       }
+      setChecked(chkStreetNames, userWantsStreetNames);
       setChecked(chkNavPoints, LS.getNavPoints());
 
       bufferEl.addEventListener('change', () => {
@@ -1168,6 +1242,14 @@
       chkMissing.addEventListener('click', () => {
         setChecked(chkMissing, !isChecked(chkMissing));
         applyFeatureFilter();
+      });
+
+      chkStreetNames.addEventListener('click', () => {
+        const on = !isChecked(chkStreetNames);
+        setChecked(chkStreetNames, on);
+        userWantsStreetNames = on;
+        LS.setStreetNames(on);
+        updateLayerVisibility();
       });
 
       chkSelectedOnly.addEventListener('click', () => {
@@ -1194,6 +1276,10 @@
         if (lastSdkFeatureIds.length) {
           wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_LAYER_NAME, featureIds: lastSdkFeatureIds });
           lastSdkFeatureIds = [];
+        }
+        if (lastStreetLabelIds.length) {
+          wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_STREETNAMES_LAYER_NAME, featureIds: lastStreetLabelIds });
+          lastStreetLabelIds = [];
         }
         streets = {};
         streetNames = {};
@@ -1224,6 +1310,10 @@
         if (lastSdkFeatureIds.length) {
           wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_LAYER_NAME, featureIds: lastSdkFeatureIds });
           lastSdkFeatureIds = [];
+        }
+        if (lastStreetLabelIds.length) {
+          wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_STREETNAMES_LAYER_NAME, featureIds: lastStreetLabelIds });
+          lastStreetLabelIds = [];
         }
         userWantsLayerVisible = false;
         updateLayerVisibility(); // keeps lastComputedVisibility in sync (a direct setLayerVisibility here left it stale)
@@ -1260,6 +1350,35 @@
         }));
         wmeSDK.Map.addFeaturesToLayer({ layerName: SDK_LAYER_NAME, features: visibleSdk });
         lastSdkFeatureIds = visibleSdk.map(f => f.id);
+
+        // One street-name label per street, anchored at the centroid of that
+        // street's visible house-number points.
+        if (lastStreetLabelIds.length) {
+          wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_STREETNAMES_LAYER_NAME, featureIds: lastStreetLabelIds });
+          lastStreetLabelIds = [];
+        }
+        const byStreet = new Map();
+        visible.forEach(feat => {
+          let g = byStreet.get(feat.street);
+          if (!g) { g = { sumLon: 0, sumLat: 0, n: 0 }; byStreet.set(feat.street, g); }
+          g.sumLon += feat.lon; g.sumLat += feat.lat; g.n++;
+        });
+        const labelSdk = [];
+        byStreet.forEach((g, streetId) => {
+          const name = streetNames[streetId];
+          if (!name) return;
+          labelSdk.push({
+            type: 'Feature',
+            id: `qhnsl-street-${streetId}`,
+            geometry: { type: 'Point', coordinates: [g.sumLon / g.n, g.sumLat / g.n] },
+            properties: { name }
+          });
+        });
+        if (labelSdk.length) {
+          wmeSDK.Map.addFeaturesToLayer({ layerName: SDK_STREETNAMES_LAYER_NAME, features: labelSdk });
+          lastStreetLabelIds = labelSdk.map(f => f.id);
+          liftLabelLayer();
+        }
       };
 
       // Single source of truth for a circle's processed/conflict state, shared
