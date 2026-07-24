@@ -35,10 +35,16 @@
   let wmeSDK;
   const SDK_LAYER_NAME = 'qhnsl-sdk';
   const SDK_STREETNAMES_LAYER_NAME = 'qhnsl-streetnames';
+  const SDK_AUDIT_LAYER_NAME = 'qhnsl-audit';
   const SDK_NAVPOINTS_LAYER_NAME = 'qhnsl-navpoints';
 
   const MAX_CLICK_DISTANCE_PX = 25;
   const MAX_HN_CONFLICT_DISTANCE = 10;
+
+  // A WME house number counts as matched only if eProstor has that number on the
+  // same street within this many metres. Above it, the number is reported as
+  // misplaced rather than missing.
+  const AUDIT_MAX_DISTANCE = 30;
 
   // Waze road types house numbers should never attach to:
   // 5 walking trail / routable pedestrian path, 10 pedestrian boardwalk,
@@ -80,7 +86,9 @@
     getNavPoints()    { return localStorage.getItem('qhnsl-navpoints') === '1'; },
     setNavPoints(v)   { localStorage.setItem('qhnsl-navpoints', v ? '1' : '0'); },
     getStreetNames()  { return localStorage.getItem('qhnsl-street-names') !== '0'; }, // default on
-    setStreetNames(v) { localStorage.setItem('qhnsl-street-names', v ? '1' : '0'); }
+    setStreetNames(v) { localStorage.setItem('qhnsl-street-names', v ? '1' : '0'); },
+    getAudit()        { return localStorage.getItem('qhnsl-audit') === '1'; },
+    setAudit(v)       { localStorage.setItem('qhnsl-audit', v ? '1' : '0'); }
   };
 
   const toast = (msg, type = 'info') => {
@@ -561,6 +569,9 @@
     let fixStreetHighlightStreetId = null; // official street ID whose HNs are highlighted during fix-street flow
     let lastSdkFeatureIds = [];
     let lastStreetLabelIds = [];
+    let lastAuditFindings = [];
+    let lastAuditFeatureIds = [];
+    let userWantsAudit = LS.getAudit();
     let isLoading = false;
     let currentLoadId = 0;
     let userWantsLayerVisible = false;
@@ -568,6 +579,7 @@
     let streetNameSpan = null;
     let currentStreetDiv = null;
     let streetAnalysisDiv = null;
+    let auditSummaryDiv = null;
 
     // Track unsaved house-number edits this session. fetchHouseNumbers reflects the
     // SAVED state only: it keeps returning pending-deleted HNs and omits pending-added
@@ -652,6 +664,37 @@
       }]
     });
     wmeSDK.Map.setLayerVisibility({ layerName: SDK_STREETNAMES_LAYER_NAME, visibility: false });
+
+    // Reverse-audit markers: WME house numbers with no eProstor counterpart.
+    // Solid = number not on that street at all; hollow = number exists but the
+    // WME pin sits more than AUDIT_MAX_DISTANCE away.
+    wmeSDK.Map.addLayer({
+      layerName: SDK_AUDIT_LAYER_NAME,
+      zIndexing: true,
+      styleContext: {
+        getAuditFill: ({ feature }) => feature.properties.type === 'missing' ? '#b04ce6' : '#ffffff',
+        getAuditFillOpacity: ({ feature }) => feature.properties.type === 'missing' ? 1 : 0.15,
+        getAuditLabel: ({ feature }) => String(feature.properties.number ?? '')
+      },
+      styleRules: [{
+        style: {
+          graphicName: 'circle',
+          pointRadius: 11,
+          fillColor: '${getAuditFill}',
+          fillOpacity: '${getAuditFillOpacity}',
+          strokeColor: '#b04ce6',
+          strokeWidth: 3,
+          strokeOpacity: 1,
+          label: '${getAuditLabel}',
+          fontColor: '#3d0a4d',
+          fontWeight: 'bold',
+          labelOutlineColor: '#ffffff',
+          labelOutlineWidth: 2
+        }
+      }]
+    });
+    wmeSDK.Map.setLayerVisibility({ layerName: SDK_AUDIT_LAYER_NAME, visibility: false });
+
     // Baseline z-index: above WME's own labels but below the segment-interaction
     // layer, so segments stay clickable even if the click-through step below never
     // succeeds.
@@ -686,6 +729,7 @@
 
     let lastComputedVisibility = false;
     let lastComputedStreetVis = false;
+    let lastComputedAuditVis = false;
     function updateLayerVisibility() {
       const currentZoom = wmeSDK.Map.getZoomLevel();
       const shouldBeVisible = userWantsLayerVisible && currentZoom >= 18;
@@ -703,6 +747,12 @@
       if (streetShouldBeVisible !== lastComputedStreetVis) {
         lastComputedStreetVis = streetShouldBeVisible;
         wmeSDK.Map.setLayerVisibility({ layerName: SDK_STREETNAMES_LAYER_NAME, visibility: streetShouldBeVisible });
+      }
+
+      const auditShouldBeVisible = shouldBeVisible && userWantsAudit;
+      if (auditShouldBeVisible !== lastComputedAuditVis) {
+        lastComputedAuditVis = auditShouldBeVisible;
+        wmeSDK.Map.setLayerVisibility({ layerName: SDK_AUDIT_LAYER_NAME, visibility: auditShouldBeVisible });
       }
 
       // Runs on every pan/zoom: reclaims the top spot if another script's layer
@@ -973,11 +1023,54 @@
       return true;
     }
 
+    function onAuditFindingClick(finding) {
+      try {
+        wmeSDK.Map.setMapCenter({ lonLat: { lon: finding.lon, lat: finding.lat } });
+      } catch (e) {
+        console.debug('[SL-HN] setMapCenter failed:', e);
+      }
+      try {
+        wmeSDK.Editing.setSelection({
+          selection: { ids: [finding.segmentId], objectType: 'segment' }
+        });
+      } catch (e) {
+        console.warn('[SL-HN] could not select segment for audit finding:', e);
+        return;
+      }
+      const what = finding.type === 'missing'
+        ? `"${finding.number}" is not in eProstor for this street`
+        : `"${finding.number}" is more than ${AUDIT_MAX_DISTANCE} m from its eProstor point`;
+      toast(`${what} — segment selected`, 'info');
+    }
+
     function handleMapClick(evt) {
       // lastComputedVisibility is false when the layer is hidden (e.g. zoom < 18):
       // no visible circles means clicks must do nothing.
       if (!userWantsLayerVisible || !lastComputedVisibility || !lastFeatures.length) return;
       if (evt == null || evt.x == null || evt.y == null) return;
+
+      // Audit markers sit on top of eProstor circles for the same address, so they
+      // must win the hit-test — otherwise clicking a flagged number would add one.
+      if (userWantsAudit && lastComputedVisibility && lastAuditFindings.length) {
+        const AUDIT_PIXELS_SQ = MAX_CLICK_DISTANCE_PX * MAX_CLICK_DISTANCE_PX;
+        let bestAudit = null;
+        let bestAuditDistSq = Infinity;
+        for (const f of lastAuditFindings) {
+          const px = wmeSDK.Map.getMapPixelFromLonLat({ lonLat: { lon: f.lon, lat: f.lat } });
+          if (!px) continue;
+          const dx = px.x - evt.x;
+          const dy = px.y - evt.y;
+          const d2 = dx * dx + dy * dy;
+          if (d2 <= AUDIT_PIXELS_SQ && d2 < bestAuditDistSq) {
+            bestAuditDistSq = d2;
+            bestAudit = f;
+          }
+        }
+        if (bestAudit) {
+          onAuditFindingClick(bestAudit);
+          return; // never fall through to the add flow
+        }
+      }
 
       const MAX_PIXELS_SQ = MAX_CLICK_DISTANCE_PX * MAX_CLICK_DISTANCE_PX;
       let bestFeature = null;
@@ -1180,11 +1273,13 @@
             <b>WME selected street:</b> <span id="hn-street-name" style="color:#2a7;font-weight:bold;">—</span>
           </div>
           <div id="hn-street-analysis" style="margin:8px 0;display:none;"></div>
+          <div id="hn-audit-summary" style="margin:8px 0;display:none;font-size:12px;"></div>
           <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
             <wz-checkbox id="hn-toggle">Show layer</wz-checkbox>
             <wz-checkbox id="qhnsl-missing">Show only missing</wz-checkbox>
             <wz-checkbox id="qhnsl-selected-only">Selected street only</wz-checkbox>
             <wz-checkbox id="qhnsl-street-names">Show street names</wz-checkbox>
+            <wz-checkbox id="qhnsl-audit">Show WME HN audit</wz-checkbox>
             <wz-checkbox id="qhnsl-navpoints">Show HN NavPoints</wz-checkbox>
             <span style="font-size:12px;">Buffer (m): <input id="qhnsl-buffer" type="number" min="0" step="50" style="width:80px;margin-left:6px"></span>
           </div>
@@ -1199,6 +1294,7 @@
       chkMissing = tabPane.querySelector('#qhnsl-missing');
       chkSelectedOnly = tabPane.querySelector('#qhnsl-selected-only');
       const chkStreetNames = tabPane.querySelector('#qhnsl-street-names');
+      const chkAudit = tabPane.querySelector('#qhnsl-audit');
       const chkNavPoints = tabPane.querySelector('#qhnsl-navpoints');
       const bufferEl   = tabPane.querySelector('#qhnsl-buffer');
       const statusDiv  = tabPane.querySelector('#hn-status');
@@ -1206,6 +1302,7 @@
       currentStreetDiv = tabPane.querySelector('#hn-current-street');
       streetNameSpan = tabPane.querySelector('#hn-street-name');
       streetAnalysisDiv = tabPane.querySelector('#hn-street-analysis');
+      auditSummaryDiv = tabPane.querySelector('#hn-audit-summary');
 
       const isChecked  = (el) => el?.hasAttribute('checked');
       const setChecked = (el, v) => v ? el.setAttribute('checked', '') : el.removeAttribute('checked');
@@ -1220,6 +1317,7 @@
         setChecked(chkSelectedOnly, true);
       }
       setChecked(chkStreetNames, userWantsStreetNames);
+      setChecked(chkAudit, userWantsAudit);
       setChecked(chkNavPoints, LS.getNavPoints());
 
       bufferEl.addEventListener('change', () => {
@@ -1252,6 +1350,15 @@
         updateLayerVisibility();
       });
 
+      chkAudit.addEventListener('click', () => {
+        const on = !isChecked(chkAudit);
+        setChecked(chkAudit, on);
+        userWantsAudit = on;
+        LS.setAudit(on);
+        updateLayerVisibility();
+        renderAuditFindings();
+      });
+
       chkSelectedOnly.addEventListener('click', () => {
         const newState = !isChecked(chkSelectedOnly);
         setChecked(chkSelectedOnly, newState);
@@ -1281,11 +1388,17 @@
           wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_STREETNAMES_LAYER_NAME, featureIds: lastStreetLabelIds });
           lastStreetLabelIds = [];
         }
+        if (lastAuditFeatureIds.length) {
+          wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_AUDIT_LAYER_NAME, featureIds: lastAuditFeatureIds });
+          lastAuditFeatureIds = [];
+        }
+        lastAuditFindings = [];
         streets = {};
         streetNames = {};
         currentStreetId = null;
         lastFeatures = [];
         streetAnalysisDiv.style.display = 'none';
+        if (auditSummaryDiv) auditSummaryDiv.style.display = 'none';
 
         await updateLayer(statusDiv, myLoadId).catch(err => console.warn('[SL-HN] updateLayer:', err));
 
@@ -1315,6 +1428,12 @@
           wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_STREETNAMES_LAYER_NAME, featureIds: lastStreetLabelIds });
           lastStreetLabelIds = [];
         }
+        if (lastAuditFeatureIds.length) {
+          wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_AUDIT_LAYER_NAME, featureIds: lastAuditFeatureIds });
+          lastAuditFeatureIds = [];
+        }
+        lastAuditFindings = [];
+        if (auditSummaryDiv) auditSummaryDiv.style.display = 'none';
         userWantsLayerVisible = false;
         updateLayerVisibility(); // keeps lastComputedVisibility in sync (a direct setLayerVisibility here left it stale)
         setChecked(chkVis, false);
@@ -1329,6 +1448,36 @@
       }
 
       btnClear.addEventListener('click', clearLayer);
+
+      function renderAuditFindings() {
+        if (lastAuditFeatureIds.length) {
+          wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_AUDIT_LAYER_NAME, featureIds: lastAuditFeatureIds });
+          lastAuditFeatureIds = [];
+        }
+
+        const sdkFeatures = lastAuditFindings.map(f => ({
+          type: 'Feature',
+          id: `qhnsl-audit-${f.hnId}`,
+          geometry: { type: 'Point', coordinates: [f.lon, f.lat] },
+          properties: { number: f.number, type: f.type, segmentId: f.segmentId }
+        }));
+
+        if (sdkFeatures.length) {
+          wmeSDK.Map.addFeaturesToLayer({ layerName: SDK_AUDIT_LAYER_NAME, features: sdkFeatures });
+          lastAuditFeatureIds = sdkFeatures.map(f => f.id);
+        }
+
+        if (!auditSummaryDiv) return;
+        if (!lastAuditFindings.length) {
+          auditSummaryDiv.style.display = 'none';
+          return;
+        }
+        const missing = lastAuditFindings.filter(f => f.type === 'missing').length;
+        const misplaced = lastAuditFindings.filter(f => f.type === 'misplaced').length;
+        auditSummaryDiv.innerHTML =
+          `<b style="color:#b04ce6;">Audit:</b> ${missing} not in eProstor · ${misplaced} misplaced`;
+        auditSummaryDiv.style.display = 'block';
+      }
 
       applyFeatureFilter = function () {
         const visible = lastFeatures.filter(isFeatureVisible);
@@ -1379,6 +1528,8 @@
           lastStreetLabelIds = labelSdk.map(f => f.id);
           liftLabelLayer();
         }
+
+        renderAuditFindings();
       };
 
       // Single source of truth for a circle's processed/conflict state, shared
@@ -1389,6 +1540,81 @@
         const processed = entry?.set.has(hn) === true || sessionAddedKeys.has(featKey(streetId, hn));
         const conflict = !processed && hasConflict(hn, x, y, entry);
         return { processed, conflict };
+      }
+
+      // Reverse audit: WME house numbers with no eProstor counterpart.
+      // Only streets eProstor actually returned are audited — a street outside
+      // the fetched bbox is skipped, never flagged.
+      function computeAuditFindings(selectionHNMap) {
+        const findings = [];
+        if (!lastFeatures.length || !selectionHNMap) return findings;
+
+        // eProstor side: street -> number -> [projected points]
+        const official = new Map();
+        lastFeatures.forEach(f => {
+          if (!f.street || !f.number) return;
+          let byNum = official.get(f.street);
+          if (!byNum) { byNum = new Map(); official.set(f.street, byNum); }
+          const num = String(f.number).trim().toLowerCase();
+          let pts = byNum.get(num);
+          if (!pts) { pts = []; byNum.set(num, pts); }
+          pts.push({ eX: f.eX, eY: f.eY });
+        });
+
+        // WME side: one record per house number. The same HN is indexed under a
+        // segment's primary AND alternate names, so fold by id first — otherwise
+        // every dual-named segment becomes a false positive.
+        const wmeHns = new Map();
+        selectionHNMap.forEach((entry, streetKey) => {
+          entry.items.forEach(it => {
+            if (!it.hnId) return;
+            let rec = wmeHns.get(it.hnId);
+            if (!rec) {
+              rec = {
+                hnId: it.hnId, num: it.num, x: it.x, y: it.y,
+                lon: it.lon, lat: it.lat, segmentId: it.segmentId,
+                streetKeys: new Set()
+              };
+              wmeHns.set(it.hnId, rec);
+            }
+            rec.streetKeys.add(streetKey);
+          });
+        });
+
+        const maxSq = AUDIT_MAX_DISTANCE * AUDIT_MAX_DISTANCE;
+
+        wmeHns.forEach(rec => {
+          if (rec.lon == null || rec.lat == null) return;
+          let audited = false;
+          let numberExistsSomewhere = false;
+          let matched = false;
+
+          for (const key of rec.streetKeys) {
+            const byNum = official.get(key);
+            if (!byNum) continue; // street not in eProstor data: out of scope
+            audited = true;
+            const pts = byNum.get(rec.num);
+            if (!pts || !pts.length) continue; // number absent on this street
+            numberExistsSomewhere = true;
+            if (pts.some(p => {
+              const dx = p.eX - rec.x;
+              const dy = p.eY - rec.y;
+              return dx * dx + dy * dy <= maxSq;
+            })) { matched = true; break; }
+          }
+
+          if (!audited || matched) return;
+          findings.push({
+            hnId: rec.hnId,
+            number: rec.num,
+            segmentId: rec.segmentId,
+            lon: rec.lon,
+            lat: rec.lat,
+            type: numberExistsSomewhere ? 'misplaced' : 'missing'
+          });
+        });
+
+        return findings;
       }
 
       async function recalculateFeatureStates() {
@@ -1404,6 +1630,13 @@
           feat.processed = processed;
           feat.conflict = conflict;
         });
+
+        try {
+          lastAuditFindings = computeAuditFindings(selectionHNMap);
+        } catch (e) {
+          lastAuditFindings = [];
+          console.warn('[SL-HN] audit failed:', e);
+        }
 
         applyFeatureFilter();
       }
@@ -1818,6 +2051,14 @@
                 });
               }
 
+              lastFeatures = features; // computeAuditFindings reads lastFeatures
+              try {
+                lastAuditFindings = computeAuditFindings(selectionHNMap);
+              } catch (e) {
+                lastAuditFindings = [];
+                console.warn('[SL-HN] audit failed:', e);
+              }
+
               const allStreetIds = new Set();
               selectedSegments.forEach(seg => {
                 (seg.alternateStreetIds || []).forEach(id => allStreetIds.add(id));
@@ -1920,7 +2161,15 @@
             }
 
             entry.set.add(numRaw);
-            entry.items.push({ num: numRaw, x: eX, y: eY });
+            entry.items.push({
+              num: numRaw,
+              x: eX,
+              y: eY,
+              hnId: String(hn.id),
+              segmentId: hn.segmentId,
+              lon: x,
+              lat: y
+            });
           });
         });
 
