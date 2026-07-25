@@ -129,7 +129,9 @@ test('the script boots without throwing', async () => {
 
 test('startup creates every overlay layer', async () => {
   const { layers } = await bootScript();
-  for (const name of ['qhnsl-sdk', 'qhnsl-streetnames', 'qhnsl-audit']) {
+  // qhnsl-navpoints included deliberately: NavPoints lives outside init(), and this
+  // asserts that wiring survives.
+  for (const name of ['qhnsl-sdk', 'qhnsl-streetnames', 'qhnsl-audit', 'qhnsl-navpoints']) {
     assert.ok(layers.has(name), `expected layer ${name} to be created`);
   }
 });
