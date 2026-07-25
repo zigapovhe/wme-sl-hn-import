@@ -1524,7 +1524,10 @@
         applyFeatureFilter();
       });
 
-      async function loadSelectedStreet() {
+      // auto: true when triggered by selection change rather than by the user.
+      // Callers must not be wired directly to an event, or the event object lands
+      // in this options slot.
+      async function loadSelectedStreet({ auto = false } = {}) {
         if (isLoading) return;
         // Validate before wiping anything — an accidental Alt+Shift+L with no
         // selection must not destroy the currently loaded street.
@@ -1562,9 +1565,15 @@
 
         // Skip post-load side effects if user clicked Clear (or another Load) mid-fetch
         if (myLoadId === currentLoadId) {
-          userWantsLayerVisible = true;
-          setChecked(chkVis, true);
-          LS.setLayerVisible(true);
+          // Pressing Load is an explicit request to see the result, so it forces the
+          // layer on. An auto-load is not: silently re-showing an overlay the user
+          // hid, just because they selected a segment, would be surprising. The data
+          // is loaded either way and appears as soon as they tick Show layer.
+          if (!auto) {
+            userWantsLayerVisible = true;
+            setChecked(chkVis, true);
+            LS.setLayerVisible(true);
+          }
           updateLayerVisibility();
         }
 
@@ -1573,7 +1582,8 @@
         isLoading = false;
       }
 
-      btnLoad.addEventListener('click', loadSelectedStreet);
+      // Wrapped, not passed directly: the click event would arrive as the options argument.
+      btnLoad.addEventListener('click', () => loadSelectedStreet());
 
       // True when every point of the selection already lies inside the area
       // eProstor was fetched for, i.e. we already hold reference data for it.
@@ -1620,7 +1630,7 @@
           const stillSelected = getSelectedSegments();
           if (stillSelected.length === 0) return;
           if (selectionCoveredByLoadedBbox(stillSelected)) return;
-          loadSelectedStreet().catch(err => console.warn('[SL-HN] auto-load failed:', err));
+          loadSelectedStreet({ auto: true }).catch(err => console.warn('[SL-HN] auto-load failed:', err));
         }, 400);
       }
 
@@ -2112,7 +2122,7 @@
         try { wmeSDK.Shortcuts.deleteShortcut({ shortcutId: id }); } catch (_) {}
       });
       [
-        { shortcutId: 'qhnsl-load',  shortcutKeys: 'AS+l', description: 'SL-HN: Load selected street', callback: loadSelectedStreet },
+        { shortcutId: 'qhnsl-load',  shortcutKeys: 'AS+l', description: 'SL-HN: Load selected street', callback: () => loadSelectedStreet() },
         { shortcutId: 'qhnsl-clear', shortcutKeys: 'AS+k', description: 'SL-HN: Clear',                callback: clearLayer }
       ].forEach(spec => {
         try { wmeSDK.Shortcuts.createShortcut(spec); }
