@@ -436,6 +436,27 @@
     return checked > 0;
   }
 
+  // Grid size for the location component of a feature key. Anything coarser than a
+  // town and finer than the distance between towns works.
+  const FEAT_KEY_GRID_M = 1000;
+
+  // Identifies one address for the "added this session but not yet saved" set.
+  //
+  // The location component is load-bearing: keyed on street name and number alone,
+  // "Glavna cesta 12" in one town collided with "Glavna cesta 12" in another. Adding
+  // the first without saving then made the second look already-added — its circle
+  // faded, "Show only missing" hid it, and clicking did nothing, so a genuinely
+  // absent house number could not be added at all until the editor was saved.
+  //
+  // Derived from the address's own EPSG:3794 coordinates, so it is stable for a given
+  // address regardless of where the grid boundaries fall.
+  function makeFeatKey(streetId, number, eX, eY) {
+    const cell = (Number.isFinite(eX) && Number.isFinite(eY))
+      ? `${Math.floor(eX / FEAT_KEY_GRID_M)}:${Math.floor(eY / FEAT_KEY_GRID_M)}`
+      : 'nocoords';
+    return `${streetId}|${number}|${cell}`;
+  }
+
   // Build CQL filter for coordinate bounds (excludes apartments)
   function buildCqlFilter(minE, minN, maxE, maxN) {
     return `E>=${minE} AND E<=${maxE} AND N>=${minN} AND N<=${maxN} AND ST_STANOVANJA IS NULL`;
@@ -1158,7 +1179,7 @@
     const sessionAddedKeys = new Set(); // feature keys we added this session (not yet in saved model)
     const hnIdToAddedKey = new Map();   // added houseNumberId -> feature key, to undo on later delete
     let pendingAddKey = null;           // set just before addHouseNumber, consumed by the added event
-    const featKey = (streetId, number) => `${streetId} ${number}`;
+    const featKey = makeFeatKey;
 
     let chkMissing = null;
     let chkSelectedOnly = null;
@@ -1673,7 +1694,7 @@
       markSelfSelection();
       wmeSDK.Editing.setSelection({ selection: { ids: [segment.id], objectType: 'segment' } });
 
-      const key = featKey(feature.street, feature.number);
+      const key = featKey(feature.street, feature.number, feature.eX, feature.eY);
       // Set before the call so a synchronous added-event can pair the new id with this feature.
       pendingAddKey = key;
       try {
@@ -2143,7 +2164,7 @@
       // WME (entry) OR added this session but not saved yet.
       function computeFeatureState(streetId, hn, x, y, selectionHNMap) {
         const entry = selectionHNMap.get(streetId);
-        const processed = entry?.set.has(hn) === true || sessionAddedKeys.has(featKey(streetId, hn));
+        const processed = entry?.set.has(hn) === true || sessionAddedKeys.has(featKey(streetId, hn, x, y));
         const conflict = !processed && hasConflict(hn, x, y, entry);
         return { processed, conflict };
       }
@@ -2632,6 +2653,7 @@
       computeAuditFindings,
       computeFetchBbox,
       isSelectionInsideBbox,
+      makeFeatKey,
       NON_ADDRESSABLE_ROAD_TYPES,
       AUDIT_MAX_DISTANCE,
       MAX_HN_CONFLICT_DISTANCE

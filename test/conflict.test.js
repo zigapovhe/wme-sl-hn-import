@@ -82,3 +82,52 @@ test('items without coordinates are skipped, not treated as co-located', () => {
   );
   assert.strictEqual(hasConflict('12', 5, 5, entry([null])), false);
 });
+
+const { makeFeatKey } = require('../wme-sl-hn-import.user.js');
+
+test('same street name in different towns does not share a session key', () => {
+  // The bug this guards: adding "Glavna cesta 12" in one town without saving made the
+  // same-numbered address in another town look already-added — faded, filtered out by
+  // "Show only missing", and unclickable, so it could not be added at all.
+  const townA = makeFeatKey('glavna_cesta', '12', 500000, 100000);
+  const townB = makeFeatKey('glavna_cesta', '12', 460000, 70000);
+  assert.notStrictEqual(townA, townB);
+});
+
+test('the same address always produces the same key', () => {
+  assert.strictEqual(
+    makeFeatKey('glavna_cesta', '12', 500123, 100456),
+    makeFeatKey('glavna_cesta', '12', 500123, 100456)
+  );
+});
+
+test('neighbouring house numbers on one street differ', () => {
+  assert.notStrictEqual(
+    makeFeatKey('glavna_cesta', '12', 500000, 100000),
+    makeFeatKey('glavna_cesta', '14', 500000, 100000)
+  );
+});
+
+test('nearby addresses on the same street share a cell but stay distinct by number', () => {
+  // Two points a few metres apart must not be split into different keys for the SAME
+  // number — that would let one address be added twice.
+  assert.strictEqual(
+    makeFeatKey('glavna_cesta', '12', 500001, 100001),
+    makeFeatKey('glavna_cesta', '12', 500001, 100001)
+  );
+});
+
+test('missing coordinates still yield a usable, non-throwing key', () => {
+  assert.strictEqual(typeof makeFeatKey('glavna_cesta', '12', undefined, undefined), 'string');
+  assert.strictEqual(
+    makeFeatKey('glavna_cesta', '12', NaN, NaN),
+    makeFeatKey('glavna_cesta', '12', undefined, undefined)
+  );
+});
+
+test('the key contains no control characters', () => {
+  // It used to be joined with a literal NUL, which made grep treat the whole
+  // userscript as a binary file and skipped it in ripgrep entirely.
+  const key = makeFeatKey('glavna_cesta', '12', 500000, 100000);
+  assert.ok(!/[\x00-\x1f]/.test(key), `key contains a control character: ${JSON.stringify(key)}`);
+});

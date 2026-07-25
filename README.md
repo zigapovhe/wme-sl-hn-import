@@ -59,6 +59,12 @@ Hollow markers are the weaker signal — a house number can legitimately sit a b
 
 Only streets present in the loaded eProstor data are audited, and only inside the area that was fetched. Anything outside stays unflagged rather than being wrongly reported as missing, so pan and press Load again to audit a new area.
 
+### Known limitation
+
+Whether a house number shows as already-present is worked out from the Waze data **currently in view**, while the loaded address points cover the wider buffered area. Circles well outside the viewport can therefore look un-added even when they already exist in WME, and clicking one would add a duplicate.
+
+Press Load again after panning to refresh that state. Fixing it properly means fetching Waze house numbers for the whole buffered area rather than the visible map, which gets expensive at larger buffer settings — so it is a deliberate trade-off rather than an oversight.
+
 ## 📍 HN NavPoints Overlay
 
 Optional passive overlay showing every loaded Waze house number as a dashed line from its map pin to its anchor point on the segment, plus the number as a colored label. Color indicates edit state:
