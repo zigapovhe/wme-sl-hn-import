@@ -633,9 +633,13 @@
           });
         }
 
+        // SDK v2.359 moved the address fields into an `addressData` envelope. The old
+        // top-level shape still works but is deprecated, and SegmentAddressData makes
+        // ids and raw names mutually exclusive (`primaryStreetId?: never` in the raw
+        // variant), so the two can never be mixed by accident.
         wmeSDK.DataModel.Segments.updateAddress({
           segmentId: segment.id,
-          primaryStreetId: street.id
+          addressData: { primaryStreetId: street.id }
         });
         console.debug('[SL-HN] Updated segment', segment.id, 'to street ID:', street.id);
         renamed++;
@@ -2486,6 +2490,10 @@
   (unsafeWindow || window).SDK_INITIALIZED.then(() => {
     wmeSDK = getWmeSdk({ scriptId: 'quick-hn-sl-importer', scriptName: 'Quick HN Importer (SI)' });
     wmeSDK.Events.once({ eventName: 'wme-ready' }).then(() => {
+      // Two lists, because the consequence differs. Anything in `required` aborts
+      // startup — put a method here only if the script is genuinely unusable without
+      // it. Adding a merely-nice-to-have here once made the whole script vanish when
+      // a single optional method was absent.
       const required = [
         'DataModel.Segments.getAll',
         'DataModel.Segments.getById',
@@ -2498,6 +2506,9 @@
         'DataModel.Streets.addStreet',
         'Editing.setSelection',
         'Editing.getSelection',
+        'Events.on',
+        'Events.once',
+        'Sidebar.registerScriptTab',
         'Map.addLayer',
         'Map.addFeaturesToLayer',
         'Map.removeFeaturesFromLayer',
@@ -2506,17 +2517,42 @@
         'Map.getMapExtent',
         'Map.getMapPixelFromLonLat'
       ];
-      const missing = required.filter(path => {
-        const parts = path.split('.');
+
+      // Each of these is already guarded at its call site and degrades to a smaller
+      // feature set. They are checked only so a renamed SDK method shows up in the
+      // console instead of silently doing nothing.
+      const optional = [
+        'Map.setLayerZIndex',          // street labels sink under other overlays
+        'Map.setMapCenter',            // audit clicks select but do not recentre
+        'Notifications.show',          // toasts fall back to console
+        'Shortcuts.createShortcut',    // keyboard shortcuts unavailable
+        'Shortcuts.deleteShortcut',
+        'Events.trackDataModelEvents', // live un-fade on external HN edits
+        'DataModel.Cities.getById',    // fallback city lookup for address-less segments
+        'DataModel.Cities.getCity',
+        'DataModel.Cities.getTopCity',
+        'DataModel.Cities.addCity',
+        'DataModel.Countries.getTopCountry'
+      ];
+
+      const isMissing = (path) => {
         let cur = wmeSDK;
-        for (const p of parts) { cur = cur?.[p]; if (cur == null) return true; }
+        for (const p of path.split('.')) { cur = cur?.[p]; if (cur == null) return true; }
         return false;
-      });
+      };
+
+      const missing = required.filter(isMissing);
       if (missing.length) {
         console.error('[SL-HN] WME SDK missing required APIs:', missing);
         toast(`SL-HN: WME SDK is missing ${missing.length} required APIs. See console.`, 'error');
         return;
       }
+
+      const missingOptional = optional.filter(isMissing);
+      if (missingOptional.length) {
+        console.warn('[SL-HN] WME SDK missing optional APIs (features degraded):', missingOptional);
+      }
+
       init();
     });
   });
