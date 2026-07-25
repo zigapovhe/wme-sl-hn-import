@@ -1113,6 +1113,9 @@
 
     let applyFeatureFilter = () => {};
     let analyzeStreetMatches = () => {};
+    // Assigned when the panel is built. Needed out here so updateLayerVisibility can
+    // re-render the audit when its layer becomes visible or hidden.
+    let renderAuditFindings = () => {};
 
     try {
       I18n.translations[I18n.currentLocale()].layers.name['quick-hn-sl-importer'] = 'Quick HN Importer';
@@ -1158,6 +1161,7 @@
     liftLabelLayer();
 
     function updateLayerVisibility() {
+      const auditWasShown = overlays.audit.shown;
       const zoomOk = wmeSDK.Map.getZoomLevel() >= MIN_OVERLAY_ZOOM;
       // hn is the base gate; the other two ride it plus their own toggle.
       const hnVisible = overlays.hn.wanted && zoomOk;
@@ -1169,8 +1173,18 @@
 
       for (const [overlay, visible] of desired) {
         if (visible === overlay.shown) continue;
+        // Record only after the SDK accepted it. Setting `shown` first meant one
+        // failed call left the flag lying forever — and since the loop skips on
+        // `visible === overlay.shown`, nothing would ever retry. handleMapClick trusts
+        // `shown`, so it would hit-test circles the user cannot see and a click on
+        // apparently empty map would add a house number.
+        try {
+          wmeSDK.Map.setLayerVisibility({ layerName: overlay.name, visibility: visible });
+        } catch (e) {
+          console.warn(`[SL-HN] could not change visibility of ${overlay.name}:`, e);
+          continue;
+        }
         overlay.shown = visible;
-        wmeSDK.Map.setLayerVisibility({ layerName: overlay.name, visibility: visible });
         // Only the base layer explains itself: hiding the other two is always a
         // deliberate toggle, never a surprise.
         if (overlay === overlays.hn && overlays.hn.wanted && !visible && lastFeatures.length > 0) {
@@ -1181,6 +1195,11 @@
       // Runs on every pan/zoom, not just on change: reclaims the top spot if another
       // script's layer load reshuffled z-indexes since the last time we looked.
       if (desired.get(overlays.labels)) liftLabelLayer();
+
+      // The audit renders only while its layer is shown, so a flip either way needs a
+      // re-render: to populate markers on becoming visible, and to drop the summary
+      // on becoming hidden.
+      if (overlays.audit.shown !== auditWasShown) renderAuditFindings();
     }
 
     wmeSDK.Events.on({ eventName: 'wme-map-zoom-changed', eventHandler: updateLayerVisibility });
@@ -1797,6 +1816,10 @@
         overlays.labels.wanted = on;
         LS.setStreetNames(on);
         updateLayerVisibility();
+        // Label features are only built while the overlay is wanted, so turning it
+        // back on has to rebuild them — changing visibility alone would show an
+        // empty layer.
+        applyFeatureFilter();
       });
 
       chkAudit.addEventListener('click', () => {
@@ -1961,10 +1984,12 @@
 
       btnClear.addEventListener('click', clearLayer);
 
-      function renderAuditFindings() {
-        // Disabled means silent: no markers and no summary. Reporting counts for a
-        // feature the user switched off tells them about problems they cannot see.
-        if (!overlays.audit.wanted) {
+      renderAuditFindings = function () {
+        // Silent unless the markers are actually on screen. `wanted` alone was not
+        // enough: below MIN_OVERLAY_ZOOM, or when an auto-load left the base layer
+        // off, the summary still printed counts for markers that were not drawn and
+        // that handleMapClick refuses to hit-test.
+        if (!overlays.audit.wanted || !overlays.audit.shown) {
           setOverlayFeatures(overlays.audit, []);
           if (auditSummaryDiv) auditSummaryDiv.style.display = 'none';
           return;
@@ -1989,7 +2014,7 @@
         auditSummaryDiv.innerHTML =
           `<b style="color:#b04ce6;">Audit:</b> ${missing} not in eProstor · ${misplaced} misplaced`;
         auditSummaryDiv.style.display = 'block';
-      }
+      };
 
       applyFeatureFilter = function () {
         // Drop unplottable points before handing them to the SDK: one bad coordinate
@@ -2012,37 +2037,33 @@
           }
         })));
 
-        // One street-name label per street, anchored at the centroid of that
-        // street's visible house-number points.
-        const byStreet = new Map();
-        visible.forEach(feat => {
-          let g = byStreet.get(feat.street);
-          if (!g) { g = { sumLon: 0, sumLat: 0, n: 0 }; byStreet.set(feat.street, g); }
-          g.sumLon += feat.lon; g.sumLat += feat.lat; g.n++;
-        });
+        // One street-name label per street, anchored at the centroid of that street's
+        // visible house-number points. Skipped entirely when the overlay is off —
+        // building and uploading features nobody can see is pure waste.
         const labelSdk = [];
-        byStreet.forEach((g, streetId) => {
-          const name = streetNames[streetId];
-          if (!name) return;
-          const lon = g.sumLon / g.n;
-          const lat = g.sumLat / g.n;
-          if (!Number.isFinite(lon) || !Number.isFinite(lat)) return; // a NaN centroid is rejected by the SDK
-          labelSdk.push({
-            type: 'Feature',
-            id: `qhnsl-street-${streetId}`,
-            geometry: { type: 'Point', coordinates: [lon, lat] },
-            properties: { name }
+        if (overlays.labels.wanted) {
+          const byStreet = new Map();
+          visible.forEach(feat => {
+            let g = byStreet.get(feat.street);
+            if (!g) { g = { sumLon: 0, sumLat: 0, n: 0 }; byStreet.set(feat.street, g); }
+            g.sumLon += feat.lon; g.sumLat += feat.lat; g.n++;
           });
-        });
-        // These two are display-only, and applyFeatureFilter runs inside
-        // addHouseNumberToSegment's try block: an unguarded throw here would report
-        // a house number that was actually added as a failure.
-        try {
-          setOverlayFeatures(overlays.labels, labelSdk);
-          if (labelSdk.length) liftLabelLayer();
-        } catch (e) {
-          console.warn('[SL-HN] street label render failed:', e);
+          byStreet.forEach((g, streetId) => {
+            const name = streetNames[streetId];
+            if (!name) return;
+            const lon = g.sumLon / g.n;
+            const lat = g.sumLat / g.n;
+            if (!Number.isFinite(lon) || !Number.isFinite(lat)) return; // a NaN centroid is rejected by the SDK
+            labelSdk.push({
+              type: 'Feature',
+              id: `qhnsl-street-${streetId}`,
+              geometry: { type: 'Point', coordinates: [lon, lat] },
+              properties: { name }
+            });
+          });
         }
+        setOverlayFeatures(overlays.labels, labelSdk);
+        if (labelSdk.length) liftLabelLayer();
 
         try {
           renderAuditFindings();
