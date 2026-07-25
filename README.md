@@ -36,9 +36,28 @@ No manual typing is needed — just click.
 - Show only missing house numbers  
 - Show only the selected street  
 - Show street names on the map (on by default)  
-- Show WME HN audit — flags house numbers in WME with no eProstor counterpart (off by default)  
+- Show WME HN audit — see below (off by default)  
 - Auto-load addresses when selecting a street (off by default)  
 - Adjust the buffer distance (default: 500 m)
+
+The street names and HN audit overlays follow the main layer: both need **Show layer** on and zoom level 18 or above.
+
+## 🔍 Reverse HN Audit
+
+The normal overlay checks eProstor against WME. This checks the other direction: house numbers that exist **in WME** but do not line up with eProstor — typos, demolished addresses, bad old imports.
+
+Purple markers, in two kinds:
+
+| Marker | Meaning |
+| --- | --- |
+| 🟣 Solid | The number is **not on that street** in eProstor at all |
+| ⚪ Hollow | The number **does exist**, but the WME pin sits more than 30 m from eProstor's point for it |
+
+Hollow markers are the weaker signal — a house number can legitimately sit a building's width from the official point, so treat them as "worth a look", not as proof of an error.
+
+**Clicking a marker centers the map and selects the owning segment** (changing your current selection), then tells you why it was flagged. It never edits or deletes anything — fix it yourself with WME's house-number editor.
+
+Only streets present in the loaded eProstor data are audited, and only inside the area that was fetched. Anything outside stays unflagged rather than being wrongly reported as missing, so pan and press Load again to audit a new area.
 
 ## 📍 HN NavPoints Overlay
 

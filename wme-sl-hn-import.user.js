@@ -202,13 +202,22 @@
       .filter(Boolean);
   }
 
+  // The single normalization rule for comparing house numbers. Both sides of
+  // every comparison must go through this: eProstor writes "12a" where an editor
+  // may have typed "12 a", and a mismatch makes the audit report valid data as
+  // missing. Internal whitespace is collapsed; "/" is deliberately kept, since
+  // it can distinguish genuinely different addresses.
+  function normalizeHN(value) {
+    return String(value == null ? '' : value).trim().toLowerCase().replace(/\s+/g, '');
+  }
+
   // Build house number string from components
   function buildHouseNumber(stevilka, dodatek) {
     let hn = String(stevilka || '').trim();
     if (dodatek) {
       hn += String(dodatek).trim();
     }
-    return hn.toLowerCase();
+    return normalizeHN(hn);
   }
 
   // Check if a house number has a nearby conflict (different HN within threshold distance)
@@ -568,7 +577,18 @@
     // Last street auto-load fetched for. Tracked separately from currentStreetId,
     // which stays null when WME's spelling doesn't match eProstor's — without this
     // the dedup guard would miss and re-fetch on every selection change.
-    let lastAutoLoadedKey = null;
+    // EPSG:3794 bbox eProstor was last fetched for. Outside it we have no reference
+    // data, so the audit must stay silent rather than claim a number is missing.
+    let lastLoadedBbox = null;
+    let autoLoadTimer = null;
+    // The script's own setSelection calls raise wme-selection-changed. Without a
+    // suppression window auto-load re-enters on them and reloads underneath the
+    // user — closing the fix-street dialog mid-decision, or wiping the audit
+    // findings on the very click meant to inspect one.
+    let suppressAutoLoadUntil = 0;
+    function markSelfSelection() {
+      suppressAutoLoadUntil = Date.now() + 2000;
+    }
     let streetNames = {};
     let streets = {};
     let lastFeatures = [];
@@ -700,6 +720,11 @@
       }]
     });
     wmeSDK.Map.setLayerVisibility({ layerName: SDK_AUDIT_LAYER_NAME, visibility: false });
+    // Deliberately NOT pinning z-index on the HN or audit layers. An explicit index
+    // on the HN layer buried it under WME's own layers until a selection change made
+    // OpenLayers recompute and discard the value, so circles only appeared after
+    // deselecting. OL's own ordering works; audit/HN overlap is handled instead by
+    // resolving clicks on proximity in handleMapClick.
 
     // Baseline z-index: above WME's own labels but below the segment-interaction
     // layer, so segments stay clickable even if the click-through step below never
@@ -718,6 +743,11 @@
     let labelLayerDiv = null;
     function liftLabelLayer() {
       try {
+        // A cached node that has been detached (map re-init, another script
+        // re-adding layers) must be re-resolved: writing pointer-events to the dead
+        // node while lifting the live layer to z-index 10000 would put a
+        // full-viewport click-swallowing div over the whole editor.
+        if (labelLayerDiv && !labelLayerDiv.isConnected) labelLayerDiv = null;
         if (!labelLayerDiv) {
           // W.map is a WMEMap wrapper; the OpenLayers map (with .layers) is behind getOLMap().
           const wmeMap = (unsafeWindow || window).W?.map;
@@ -1029,6 +1059,17 @@
       return true;
     }
 
+    // Mirrors isFeatureVisible for audit markers, so the checkbox filters hide them
+    // and — because the hit-test consults this too — a filtered-out marker can no
+    // longer hijack a click and drag the user onto a street they filtered away.
+    function isAuditFindingVisible(finding) {
+      if (chkSelectedOnly?.hasAttribute('checked') && currentStreetId) {
+        const keys = finding.streetKeys || [];
+        if (!keys.includes(currentStreetId)) return false;
+      }
+      return true;
+    }
+
     function onAuditFindingClick(finding) {
       try {
         wmeSDK.Map.setMapCenter({ lonLat: { lon: finding.lon, lat: finding.lat } });
@@ -1036,6 +1077,7 @@
         console.debug('[SL-HN] setMapCenter failed:', e);
       }
       try {
+        markSelfSelection();
         wmeSDK.Editing.setSelection({
           selection: { ids: [finding.segmentId], objectType: 'segment' }
         });
@@ -1055,30 +1097,28 @@
       if (!userWantsLayerVisible || !lastComputedVisibility || !lastFeatures.length) return;
       if (evt == null || evt.x == null || evt.y == null) return;
 
-      // Audit markers sit on top of eProstor circles for the same address, so they
-      // must win the hit-test — otherwise clicking a flagged number would add one.
-      if (userWantsAudit && lastComputedVisibility && lastAuditFindings.length) {
-        const AUDIT_PIXELS_SQ = MAX_CLICK_DISTANCE_PX * MAX_CLICK_DISTANCE_PX;
-        let bestAudit = null;
-        let bestAuditDistSq = Infinity;
+      const MAX_PIXELS_SQ = MAX_CLICK_DISTANCE_PX * MAX_CLICK_DISTANCE_PX;
+
+      // Nearest audit marker, if the audit is live. Resolved against the nearest
+      // eProstor circle below rather than short-circuiting here: a 'missing'
+      // finding is by definition NOT co-located with an eProstor point, so
+      // winning on mere presence would make the neighbouring address unclickable.
+      let bestAudit = null;
+      let bestAuditDistSq = Infinity;
+      if (userWantsAudit && lastComputedAuditVis && lastAuditFindings.length) {
         for (const f of lastAuditFindings) {
+          if (!isAuditFindingVisible(f)) continue;
           const px = wmeSDK.Map.getMapPixelFromLonLat({ lonLat: { lon: f.lon, lat: f.lat } });
           if (!px) continue;
           const dx = px.x - evt.x;
           const dy = px.y - evt.y;
           const d2 = dx * dx + dy * dy;
-          if (d2 <= AUDIT_PIXELS_SQ && d2 < bestAuditDistSq) {
+          if (d2 <= MAX_PIXELS_SQ && d2 < bestAuditDistSq) {
             bestAuditDistSq = d2;
             bestAudit = f;
           }
         }
-        if (bestAudit) {
-          onAuditFindingClick(bestAudit);
-          return; // never fall through to the add flow
-        }
       }
-
-      const MAX_PIXELS_SQ = MAX_CLICK_DISTANCE_PX * MAX_CLICK_DISTANCE_PX;
       let bestFeature = null;
       let bestDistSq = Infinity;
 
@@ -1094,6 +1134,13 @@
           bestDistSq = d2;
           bestFeature = f;
         }
+      }
+
+      // Closest wins. Ties go to the audit, since an audit marker overlapping an
+      // eProstor circle means the two concern the same address.
+      if (bestAudit && bestAuditDistSq <= bestDistSq) {
+        onAuditFindingClick(bestAudit);
+        return;
       }
 
       if (!bestFeature) return;
@@ -1145,6 +1192,7 @@
 
     // Attach a house number to a segment (shared by direct add, "add anyway" and post-rename auto-add)
     function addHouseNumberToSegment(feature, segment) {
+      markSelfSelection();
       wmeSDK.Editing.setSelection({ selection: { ids: [segment.id], objectType: 'segment' } });
 
       const key = featKey(feature.street, feature.number);
@@ -1204,6 +1252,7 @@
 
       const segmentIds = [...candidateIds];
       if (segmentIds.length > 0) {
+        markSelfSelection();
         wmeSDK.Editing.setSelection({ selection: { ids: segmentIds, objectType: 'segment' } });
       }
 
@@ -1432,38 +1481,51 @@
 
       btnLoad.addEventListener('click', loadSelectedStreet);
 
+      // True when every point of the selection already lies inside the area
+      // eProstor was fetched for, i.e. we already hold reference data for it.
+      function selectionCoveredByLoadedBbox(selected) {
+        if (!lastLoadedBbox) return false;
+        for (const seg of selected) {
+          const coords = seg.geometry?.coordinates;
+          if (!Array.isArray(coords)) continue;
+          for (const pt of coords) {
+            const [e, n] = proj4('EPSG:4326', 'EPSG:3794', [pt[0], pt[1]]);
+            if (e < lastLoadedBbox.minE || e > lastLoadedBbox.maxE ||
+                n < lastLoadedBbox.minN || n > lastLoadedBbox.maxN) return false;
+          }
+        }
+        return true;
+      }
+
       // Auto-load fires on selection change, never on pan: updateLayer derives its
       // bbox from the selected segment, and auto-fetching per pan would hammer the
       // eProstor API far harder than the manual flow.
       // Defined here (not next to onSelectionChanged) because loadSelectedStreet
       // lives in this closure.
-      let autoLoadTimer = null;
       function maybeAutoLoad() {
         if (!LS.getAutoLoad() || isLoading) return;
+        if (Date.now() < suppressAutoLoadUntil) return; // our own setSelection
 
         const selected = getSelectedSegments();
         if (selected.length === 0) return;
 
-        const primaryStreetId = selected[0].primaryStreetId;
-        if (!primaryStreetId) return;
-
-        const street = wmeSDK.DataModel.Streets.getById({ streetId: primaryStreetId });
-        const name = street?.name;
-        if (!name) return;
-
-        // Never re-fetch the street already loaded. Two guards: currentStreetId
-        // covers the normal case, lastAutoLoadedKey covers streets whose WME
-        // spelling doesn't match eProstor's (where currentStreetId stays null).
-        const key = normalizeStreetName(name);
-        if (currentStreetId && key === currentStreetId) return;
-        if (key === lastAutoLoadedKey) return;
+        // Dedup on coverage, not street name. eProstor is fetched per bbox, so
+        // "already loaded" is a question about area: a name key silently skipped
+        // same-named streets elsewhere, never fired for alternate-name-only
+        // segments, and went permanently stale when a load failed.
+        if (selectionCoveredByLoadedBbox(selected)) return;
 
         // Debounce: click-dragging across segments must fire one fetch, not many.
         if (autoLoadTimer) clearTimeout(autoLoadTimer);
         autoLoadTimer = setTimeout(() => {
           autoLoadTimer = null;
-          if (isLoading) return;
-          lastAutoLoadedKey = key;
+          // Re-validate: during the debounce the user may have deselected, turned
+          // auto-load off, or another load may have started.
+          if (!LS.getAutoLoad() || isLoading) return;
+          if (Date.now() < suppressAutoLoadUntil) return;
+          const stillSelected = getSelectedSegments();
+          if (stillSelected.length === 0) return;
+          if (selectionCoveredByLoadedBbox(stillSelected)) return;
           loadSelectedStreet().catch(err => console.warn('[SL-HN] auto-load failed:', err));
         }, 400);
       }
@@ -1487,7 +1549,10 @@
         }
         lastAuditFindings = [];
         if (auditSummaryDiv) auditSummaryDiv.style.display = 'none';
-        lastAutoLoadedKey = null; // Clear means "start over": allow re-fetching the same street
+        // Cancel any armed auto-load, or it fires after this and silently undoes
+        // the Clear the user just asked for.
+        if (autoLoadTimer) { clearTimeout(autoLoadTimer); autoLoadTimer = null; }
+        lastLoadedBbox = null; // no reference data any more, so the audit must stay silent
         userWantsLayerVisible = false;
         updateLayerVisibility(); // keeps lastComputedVisibility in sync (a direct setLayerVisibility here left it stale)
         setChecked(chkVis, false);
@@ -1509,7 +1574,16 @@
           lastAuditFeatureIds = [];
         }
 
-        const sdkFeatures = lastAuditFindings.map(f => ({
+        // Disabled means silent: no markers and no summary. Reporting counts for a
+        // feature the user switched off tells them about problems they cannot see.
+        if (!userWantsAudit) {
+          if (auditSummaryDiv) auditSummaryDiv.style.display = 'none';
+          return;
+        }
+
+        const visibleFindings = lastAuditFindings.filter(isAuditFindingVisible);
+
+        const sdkFeatures = visibleFindings.map(f => ({
           type: 'Feature',
           id: `qhnsl-audit-${f.hnId}`,
           geometry: { type: 'Point', coordinates: [f.lon, f.lat] },
@@ -1517,17 +1591,19 @@
         }));
 
         if (sdkFeatures.length) {
-          wmeSDK.Map.addFeaturesToLayer({ layerName: SDK_AUDIT_LAYER_NAME, features: sdkFeatures });
+          // Record ids before the call that can throw: on failure the features may
+          // already be on the layer, and unrecorded ids survive every Clear and Load.
           lastAuditFeatureIds = sdkFeatures.map(f => f.id);
+          wmeSDK.Map.addFeaturesToLayer({ layerName: SDK_AUDIT_LAYER_NAME, features: sdkFeatures });
         }
 
         if (!auditSummaryDiv) return;
-        if (!lastAuditFindings.length) {
+        if (!visibleFindings.length) {
           auditSummaryDiv.style.display = 'none';
           return;
         }
-        const missing = lastAuditFindings.filter(f => f.type === 'missing').length;
-        const misplaced = lastAuditFindings.filter(f => f.type === 'misplaced').length;
+        const missing = visibleFindings.filter(f => f.type === 'missing').length;
+        const misplaced = visibleFindings.filter(f => f.type === 'misplaced').length;
         auditSummaryDiv.innerHTML =
           `<b style="color:#b04ce6;">Audit:</b> ${missing} not in eProstor · ${misplaced} misplaced`;
         auditSummaryDiv.style.display = 'block';
@@ -1570,20 +1646,34 @@
         byStreet.forEach((g, streetId) => {
           const name = streetNames[streetId];
           if (!name) return;
+          const lon = g.sumLon / g.n;
+          const lat = g.sumLat / g.n;
+          if (!Number.isFinite(lon) || !Number.isFinite(lat)) return; // a NaN centroid is rejected by the SDK
           labelSdk.push({
             type: 'Feature',
             id: `qhnsl-street-${streetId}`,
-            geometry: { type: 'Point', coordinates: [g.sumLon / g.n, g.sumLat / g.n] },
+            geometry: { type: 'Point', coordinates: [lon, lat] },
             properties: { name }
           });
         });
-        if (labelSdk.length) {
-          wmeSDK.Map.addFeaturesToLayer({ layerName: SDK_STREETNAMES_LAYER_NAME, features: labelSdk });
-          lastStreetLabelIds = labelSdk.map(f => f.id);
-          liftLabelLayer();
+        // These two are display-only, and applyFeatureFilter runs inside
+        // addHouseNumberToSegment's try block: an unguarded throw here would report
+        // a house number that was actually added as a failure.
+        try {
+          if (labelSdk.length) {
+            lastStreetLabelIds = labelSdk.map(f => f.id);
+            wmeSDK.Map.addFeaturesToLayer({ layerName: SDK_STREETNAMES_LAYER_NAME, features: labelSdk });
+            liftLabelLayer();
+          }
+        } catch (e) {
+          console.warn('[SL-HN] street label render failed:', e);
         }
 
-        renderAuditFindings();
+        try {
+          renderAuditFindings();
+        } catch (e) {
+          console.warn('[SL-HN] audit render failed:', e);
+        }
       };
 
       // Single source of truth for a circle's processed/conflict state, shared
@@ -1602,6 +1692,9 @@
       function computeAuditFindings(selectionHNMap) {
         const findings = [];
         if (!lastFeatures.length || !selectionHNMap) return findings;
+        // Without a known fetch area we cannot tell "absent from eProstor" from
+        // "outside what we asked eProstor about".
+        if (!lastLoadedBbox) return findings;
 
         // eProstor side: street -> number -> [projected points]
         const official = new Map();
@@ -1609,7 +1702,7 @@
           if (!f.street || !f.number) return;
           let byNum = official.get(f.street);
           if (!byNum) { byNum = new Map(); official.set(f.street, byNum); }
-          const num = String(f.number).trim().toLowerCase();
+          const num = normalizeHN(f.number);
           let pts = byNum.get(num);
           if (!pts) { pts = []; byNum.set(num, pts); }
           pts.push({ eX: f.eX, eY: f.eY });
@@ -1639,6 +1732,13 @@
 
         wmeHns.forEach(rec => {
           if (rec.lon == null || rec.lat == null) return;
+          // Compare like with like. selectionHNMap is scoped to the current
+          // viewport, which drifts as the user pans, while `official` is frozen to
+          // the fetched bbox. Auditing a house number outside that bbox would flag
+          // valid data as missing purely because we never asked eProstor about it.
+          if (rec.x == null || rec.y == null) return;
+          if (rec.x < lastLoadedBbox.minE || rec.x > lastLoadedBbox.maxE ||
+              rec.y < lastLoadedBbox.minN || rec.y > lastLoadedBbox.maxN) return;
           let audited = false;
           let numberExistsSomewhere = false;
           let matched = false;
@@ -1664,6 +1764,7 @@
             segmentId: rec.segmentId,
             lon: rec.lon,
             lat: rec.lat,
+            streetKeys: Array.from(rec.streetKeys),
             type: numberExistsSomewhere ? 'misplaced' : 'missing'
           });
         });
@@ -1820,7 +1921,10 @@
             if (lastFeatures.length > 0) {
               // Refresh the street analysis panel to reflect any street name changes
               analyzeStreetMatches();
-              applyFeatureFilter();
+              // Recompute, not just re-render: renaming a street is the main way a
+              // user fixes a 'missing' finding, and applyFeatureFilter alone would
+              // redraw the same purple marker over the problem they just solved.
+              recalculateFeatureStates().catch(err => console.warn('[SL-HN] recalculate after edit failed:', err));
             }
           }
         });
@@ -2106,6 +2210,11 @@
               }
 
               lastFeatures = features; // computeAuditFindings reads lastFeatures
+              // Record the area eProstor actually answered for. Set here rather than
+              // before the fetch so a failed request doesn't look like coverage: the
+              // audit may only draw conclusions inside this box, and auto-load uses
+              // it to decide whether the selection is already covered.
+              lastLoadedBbox = { minE, minN, maxE, maxN };
               try {
                 lastAuditFindings = computeAuditFindings(selectionHNMap);
               } catch (e) {
@@ -2199,7 +2308,7 @@
           if (x == null || y == null || x < lonMin || x > lonMax || y < latMin || y > latMax) return;
 
           const [eX, eY] = proj4('EPSG:4326', 'EPSG:3794', [x, y]);
-          const numRaw = String(hn.number).trim().toLowerCase();
+          const numRaw = normalizeHN(hn.number);
 
           streetIdSet.forEach(streetId => {
             const st = wmeSDK.DataModel.Streets.getById({ streetId });
@@ -2219,7 +2328,10 @@
               num: numRaw,
               x: eX,
               y: eY,
-              hnId: String(hn.id),
+              // Null, not String(hn.id): String(undefined) is the truthy string
+              // "undefined", which would collapse every id-less house number into
+              // one audit finding under a colliding feature id.
+              hnId: hn.id != null ? String(hn.id) : null,
               segmentId: hn.segmentId,
               lon: x,
               lat: y
