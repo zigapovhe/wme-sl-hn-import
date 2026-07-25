@@ -207,6 +207,15 @@
       .filter(Boolean);
   }
 
+  // Drop a layer's features and forget their ids. Returns the new (empty) id list,
+  // so every caller is one line: ids = clearLayerFeatures(LAYER, ids).
+  function clearLayerFeatures(layerName, featureIds) {
+    if (featureIds && featureIds.length) {
+      wmeSDK.Map.removeFeaturesFromLayer({ layerName, featureIds });
+    }
+    return [];
+  }
+
   // The single normalization rule for comparing house numbers. Both sides of
   // every comparison must go through this: eProstor writes "12a" where an editor
   // may have typed "12 a", and a mismatch makes the audit report valid data as
@@ -327,6 +336,35 @@
     });
 
     return findings;
+  }
+
+  // The EPSG:3794 box to ask eProstor about: the selected segments' extent, grown by
+  // `buffer` metres. Returns null when no segment has usable geometry.
+  // proj4 is passed in so this stays testable without the @require'd global.
+  function computeFetchBbox(segments, buffer, project = proj4) {
+    let minLon = Infinity, maxLon = -Infinity;
+    let minLat = Infinity, maxLat = -Infinity;
+
+    for (const seg of segments || []) {
+      const coords = seg?.geometry?.coordinates;
+      if (!Array.isArray(coords)) continue;
+      for (const [lon, lat] of coords) {
+        if (lon < minLon) minLon = lon;
+        if (lon > maxLon) maxLon = lon;
+        if (lat < minLat) minLat = lat;
+        if (lat > maxLat) maxLat = lat;
+      }
+    }
+    if (minLon === Infinity) return null;
+
+    const [blE, blN] = project('EPSG:4326', 'EPSG:3794', [minLon, minLat]);
+    const [trE, trN] = project('EPSG:4326', 'EPSG:3794', [maxLon, maxLat]);
+    return {
+      minE: Math.floor(blE - buffer),
+      minN: Math.floor(blN - buffer),
+      maxE: Math.ceil(trE + buffer),
+      maxN: Math.ceil(trN + buffer)
+    };
   }
 
   // Build CQL filter for coordinate bounds (excludes apartments)
@@ -666,13 +704,117 @@
     return Math.sqrt(dpx * dpx + dpy * dpy);
   }
 
+  // The three map overlays, all created hidden. Style only — no state, no wiring —
+  // so this stays out of init(), which is about behaviour.
+  //
+  // Note the absence of setLayerZIndex on the HN and audit layers: an explicit
+  // index on the HN layer buried it under WME's own layers until a selection change
+  // made OpenLayers recompute and discard the value, so circles appeared only after
+  // deselecting. OL's own ordering works. Audit/HN overlap is resolved by picking
+  // the nearest marker in handleMapClick, not by stacking.
+  function createOverlayLayers() {
+    // House-number circles: green on the selected street, orange elsewhere, red for
+    // a conflict, blue while the fix-street flow highlights a street.
+    wmeSDK.Map.addLayer({
+      layerName: SDK_LAYER_NAME,
+      zIndexing: true,
+      styleContext: {
+        getFillColor: ({ feature }) => {
+          const p = feature.properties;
+          if (p.fixHighlight) return '#4da6ff';
+          if (p.conflict) return '#ff6666';
+          return p.isSelectedStreet ? '#99ee99' : '#fb9c4f';
+        },
+        getOpacity: ({ feature }) => {
+          const p = feature.properties;
+          if (p.fixHighlight || p.conflict) return 1;
+          return (p.isSelectedStreet && p.processed) ? 0.3 : 1;
+        },
+        getRadius: ({ feature }) => {
+          const num = feature.properties.number;
+          return num ? Math.max(String(num).length * 7, 12) : 12;
+        },
+        getLabel: ({ feature }) => String(feature.properties.number ?? '')
+      },
+      styleRules: [{
+        style: {
+          graphicName: 'circle',
+          pointRadius: '${getRadius}',
+          fillColor: '${getFillColor}',
+          fillOpacity: '${getOpacity}',
+          strokeColor: '#ffffff',
+          strokeWidth: 2,
+          strokeOpacity: '${getOpacity}',
+          label: '${getLabel}',
+          fontColor: '#111111',
+          fontWeight: 'bold',
+          labelOutlineColor: '#ffffff',
+          labelOutlineWidth: 0
+        }
+      }]
+    });
+
+    // Label-only: one reference street name floated over each street's cluster of
+    // house-number points.
+    wmeSDK.Map.addLayer({
+      layerName: SDK_STREETNAMES_LAYER_NAME,
+      zIndexing: true, // required, or setLayerZIndex on this layer has no effect
+      styleContext: {
+        getLabel: ({ feature }) => String(feature.properties.name ?? '')
+      },
+      styleRules: [{
+        style: {
+          pointRadius: 0,
+          fillOpacity: 0,
+          strokeOpacity: 0,
+          label: '${getLabel}',
+          fontColor: '#1a3d7c',
+          fontSize: '13px',
+          fontWeight: 'bold',
+          labelOutlineColor: '#ffffff',
+          labelOutlineWidth: 3
+        }
+      }]
+    });
+
+    // Reverse-audit markers. Solid = number not on that street at all; hollow =
+    // number exists but the WME pin sits more than AUDIT_MAX_DISTANCE away.
+    wmeSDK.Map.addLayer({
+      layerName: SDK_AUDIT_LAYER_NAME,
+      zIndexing: true,
+      styleContext: {
+        getAuditFill: ({ feature }) => feature.properties.type === 'missing' ? '#b04ce6' : '#ffffff',
+        getAuditFillOpacity: ({ feature }) => feature.properties.type === 'missing' ? 1 : 0.15,
+        getAuditLabel: ({ feature }) => String(feature.properties.number ?? '')
+      },
+      styleRules: [{
+        style: {
+          graphicName: 'circle',
+          pointRadius: 11,
+          fillColor: '${getAuditFill}',
+          fillOpacity: '${getAuditFillOpacity}',
+          strokeColor: '#b04ce6',
+          strokeWidth: 3,
+          strokeOpacity: 1,
+          label: '${getAuditLabel}',
+          fontColor: '#3d0a4d',
+          fontWeight: 'bold',
+          labelOutlineColor: '#ffffff',
+          labelOutlineWidth: 2
+        }
+      }]
+    });
+
+    for (const layerName of [SDK_LAYER_NAME, SDK_STREETNAMES_LAYER_NAME, SDK_AUDIT_LAYER_NAME]) {
+      wmeSDK.Map.setLayerVisibility({ layerName, visibility: false });
+    }
+  }
+
   function init() {
     let currentStreetId = null;
-    // Last street auto-load fetched for. Tracked separately from currentStreetId,
-    // which stays null when WME's spelling doesn't match eProstor's — without this
-    // the dedup guard would miss and re-fetch on every selection change.
     // EPSG:3794 bbox eProstor was last fetched for. Outside it we have no reference
     // data, so the audit must stay silent rather than claim a number is missing.
+    // Auto-load also uses it to tell whether a selection is already covered.
     let lastLoadedBbox = null;
     let autoLoadTimer = null;
     // The script's own setSelection calls raise wme-selection-changed. Without a
@@ -721,104 +863,7 @@
       I18n.translations[I18n.currentLocale()].layers.name['quick-hn-sl-importer'] = 'Quick HN Importer';
     } catch (_) {}
 
-    wmeSDK.Map.addLayer({
-      layerName: SDK_LAYER_NAME,
-      zIndexing: true,
-      styleContext: {
-        getFillColor: ({ feature }) => {
-          const p = feature.properties;
-          if (p.fixHighlight) return '#4da6ff';
-          if (p.conflict) return '#ff6666';
-          return p.isSelectedStreet ? '#99ee99' : '#fb9c4f';
-        },
-        getOpacity: ({ feature }) => {
-          const p = feature.properties;
-          if (p.fixHighlight || p.conflict) return 1;
-          return (p.isSelectedStreet && p.processed) ? 0.3 : 1;
-        },
-        getRadius: ({ feature }) => {
-          const num = feature.properties.number;
-          return num ? Math.max(String(num).length * 7, 12) : 12;
-        },
-        getLabel: ({ feature }) => String(feature.properties.number ?? '')
-      },
-      styleRules: [{
-        style: {
-          graphicName: 'circle',
-          pointRadius: '${getRadius}',
-          fillColor: '${getFillColor}',
-          fillOpacity: '${getOpacity}',
-          strokeColor: '#ffffff',
-          strokeWidth: 2,
-          strokeOpacity: '${getOpacity}',
-          label: '${getLabel}',
-          fontColor: '#111111',
-          fontWeight: 'bold',
-          labelOutlineColor: '#ffffff',
-          labelOutlineWidth: 0
-        }
-      }]
-    });
-    wmeSDK.Map.setLayerVisibility({ layerName: SDK_LAYER_NAME, visibility: false });
-
-    // Label-only layer: one reference street name floated over each street's
-    // cluster of house-number points. Shares the HN layer's zoom/toggle gate.
-    wmeSDK.Map.addLayer({
-      layerName: SDK_STREETNAMES_LAYER_NAME,
-      zIndexing: true, // required: without it setLayerZIndex below has no effect
-      styleContext: {
-        getLabel: ({ feature }) => String(feature.properties.name ?? '')
-      },
-      styleRules: [{
-        style: {
-          pointRadius: 0,
-          fillOpacity: 0,
-          strokeOpacity: 0,
-          label: '${getLabel}',
-          fontColor: '#1a3d7c',
-          fontSize: '13px',
-          fontWeight: 'bold',
-          labelOutlineColor: '#ffffff',
-          labelOutlineWidth: 3
-        }
-      }]
-    });
-    wmeSDK.Map.setLayerVisibility({ layerName: SDK_STREETNAMES_LAYER_NAME, visibility: false });
-
-    // Reverse-audit markers: WME house numbers with no eProstor counterpart.
-    // Solid = number not on that street at all; hollow = number exists but the
-    // WME pin sits more than AUDIT_MAX_DISTANCE away.
-    wmeSDK.Map.addLayer({
-      layerName: SDK_AUDIT_LAYER_NAME,
-      zIndexing: true,
-      styleContext: {
-        getAuditFill: ({ feature }) => feature.properties.type === 'missing' ? '#b04ce6' : '#ffffff',
-        getAuditFillOpacity: ({ feature }) => feature.properties.type === 'missing' ? 1 : 0.15,
-        getAuditLabel: ({ feature }) => String(feature.properties.number ?? '')
-      },
-      styleRules: [{
-        style: {
-          graphicName: 'circle',
-          pointRadius: 11,
-          fillColor: '${getAuditFill}',
-          fillOpacity: '${getAuditFillOpacity}',
-          strokeColor: '#b04ce6',
-          strokeWidth: 3,
-          strokeOpacity: 1,
-          label: '${getAuditLabel}',
-          fontColor: '#3d0a4d',
-          fontWeight: 'bold',
-          labelOutlineColor: '#ffffff',
-          labelOutlineWidth: 2
-        }
-      }]
-    });
-    wmeSDK.Map.setLayerVisibility({ layerName: SDK_AUDIT_LAYER_NAME, visibility: false });
-    // Deliberately NOT pinning z-index on the HN or audit layers. An explicit index
-    // on the HN layer buried it under WME's own layers until a selection change made
-    // OpenLayers recompute and discard the value, so circles only appeared after
-    // deselecting. OL's own ordering works; audit/HN overlap is handled instead by
-    // resolving clicks on proximity in handleMapClick.
+    createOverlayLayers();
 
     // Baseline z-index: above WME's own labels but below the segment-interaction
     // layer, so segments stay clickable even if the click-through step below never
@@ -1541,18 +1586,9 @@
         btnLoad.disabled = true;
         btnLoadLabel.textContent = 'Loading…';
 
-        if (lastSdkFeatureIds.length) {
-          wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_LAYER_NAME, featureIds: lastSdkFeatureIds });
-          lastSdkFeatureIds = [];
-        }
-        if (lastStreetLabelIds.length) {
-          wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_STREETNAMES_LAYER_NAME, featureIds: lastStreetLabelIds });
-          lastStreetLabelIds = [];
-        }
-        if (lastAuditFeatureIds.length) {
-          wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_AUDIT_LAYER_NAME, featureIds: lastAuditFeatureIds });
-          lastAuditFeatureIds = [];
-        }
+        lastSdkFeatureIds = clearLayerFeatures(SDK_LAYER_NAME, lastSdkFeatureIds);
+        lastStreetLabelIds = clearLayerFeatures(SDK_STREETNAMES_LAYER_NAME, lastStreetLabelIds);
+        lastAuditFeatureIds = clearLayerFeatures(SDK_AUDIT_LAYER_NAME, lastAuditFeatureIds);
         lastAuditFindings = [];
         streets = {};
         streetNames = {};
@@ -1639,18 +1675,9 @@
       function clearLayer() {
         clearFixStreetState();
         currentLoadId++; // invalidate any in-flight load so its results are discarded
-        if (lastSdkFeatureIds.length) {
-          wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_LAYER_NAME, featureIds: lastSdkFeatureIds });
-          lastSdkFeatureIds = [];
-        }
-        if (lastStreetLabelIds.length) {
-          wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_STREETNAMES_LAYER_NAME, featureIds: lastStreetLabelIds });
-          lastStreetLabelIds = [];
-        }
-        if (lastAuditFeatureIds.length) {
-          wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_AUDIT_LAYER_NAME, featureIds: lastAuditFeatureIds });
-          lastAuditFeatureIds = [];
-        }
+        lastSdkFeatureIds = clearLayerFeatures(SDK_LAYER_NAME, lastSdkFeatureIds);
+        lastStreetLabelIds = clearLayerFeatures(SDK_STREETNAMES_LAYER_NAME, lastStreetLabelIds);
+        lastAuditFeatureIds = clearLayerFeatures(SDK_AUDIT_LAYER_NAME, lastAuditFeatureIds);
         lastAuditFindings = [];
         if (auditSummaryDiv) auditSummaryDiv.style.display = 'none';
         // Cancel any armed auto-load, or it fires after this and silently undoes
@@ -1673,10 +1700,7 @@
       btnClear.addEventListener('click', clearLayer);
 
       function renderAuditFindings() {
-        if (lastAuditFeatureIds.length) {
-          wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_AUDIT_LAYER_NAME, featureIds: lastAuditFeatureIds });
-          lastAuditFeatureIds = [];
-        }
+        lastAuditFeatureIds = clearLayerFeatures(SDK_AUDIT_LAYER_NAME, lastAuditFeatureIds);
 
         // Disabled means silent: no markers and no summary. Reporting counts for a
         // feature the user switched off tells them about problems they cannot see.
@@ -1715,9 +1739,7 @@
 
       applyFeatureFilter = function () {
         const visible = lastFeatures.filter(isFeatureVisible);
-        if (lastSdkFeatureIds.length) {
-          wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_LAYER_NAME, featureIds: lastSdkFeatureIds });
-        }
+        lastSdkFeatureIds = clearLayerFeatures(SDK_LAYER_NAME, lastSdkFeatureIds);
         const visibleSdk = visible.map((feat, i) => ({
           type: 'Feature',
           id: `qhnsl-${i}`,
@@ -1736,10 +1758,7 @@
 
         // One street-name label per street, anchored at the centroid of that
         // street's visible house-number points.
-        if (lastStreetLabelIds.length) {
-          wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_STREETNAMES_LAYER_NAME, featureIds: lastStreetLabelIds });
-          lastStreetLabelIds = [];
-        }
+        lastStreetLabelIds = clearLayerFeatures(SDK_STREETNAMES_LAYER_NAME, lastStreetLabelIds);
         const byStreet = new Map();
         visible.forEach(feat => {
           let g = byStreet.get(feat.street);
@@ -2141,37 +2160,14 @@
 
           loading.style.display = null;
 
-          // Compute bounding box of selected segments in WGS84 from GeoJSON coords
-          let minLon = Infinity, maxLon = -Infinity;
-          let minLat = Infinity, maxLat = -Infinity;
-          selectedSegments.forEach(seg => {
-            const coords = seg.geometry?.coordinates;
-            if (!Array.isArray(coords)) return;
-            coords.forEach(pt => {
-              const lon = pt[0], lat = pt[1];
-              if (lon < minLon) minLon = lon;
-              if (lon > maxLon) maxLon = lon;
-              if (lat < minLat) minLat = lat;
-              if (lat > maxLat) maxLat = lat;
-            });
-          });
-
-          if (minLon === Infinity) {
+          const bbox = computeFetchBbox(selectedSegments, LS.getBuffer());
+          if (!bbox) {
             loading.style.display = 'none';
             statusDiv.textContent = 'No geometry for selected segments.';
             resolve();
             return;
           }
-
-          // Convert WGS84 bbox to EPSG:3794 (Slovenia D96/TM, in meters), then buffer
-          const bl = proj4('EPSG:4326', 'EPSG:3794', [minLon, minLat]);
-          const tr = proj4('EPSG:4326', 'EPSG:3794', [maxLon, maxLat]);
-          const buffer = LS.getBuffer();
-
-          const minE = Math.floor(bl[0] - buffer);
-          const minN = Math.floor(bl[1] - buffer);
-          const maxE = Math.ceil(tr[0]  + buffer);
-          const maxN = Math.ceil(tr[1]  + buffer);
+          const { minE, minN, maxE, maxN } = bbox;
 
           Promise.all([
             fetchAddresses(minE, minN, maxE, maxN, () => loadId !== currentLoadId),
@@ -2263,10 +2259,7 @@
                 hideCurrentStreet();
               }
 
-              if (lastSdkFeatureIds.length) {
-                wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_LAYER_NAME, featureIds: lastSdkFeatureIds });
-                lastSdkFeatureIds = [];
-              }
+              lastSdkFeatureIds = clearLayerFeatures(SDK_LAYER_NAME, lastSdkFeatureIds);
 
               applyFeatureFilter();
               analyzeStreetMatches();
@@ -2419,6 +2412,7 @@
       buildCqlFilter,
       hasConflict,
       computeAuditFindings,
+      computeFetchBbox,
       AUDIT_MAX_DISTANCE,
       MAX_HN_CONFLICT_DISTANCE
     };
