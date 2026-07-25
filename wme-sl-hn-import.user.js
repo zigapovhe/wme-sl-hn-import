@@ -121,8 +121,12 @@
     );
   }
 
+  // The join key for street names on both sides of every comparison. Trimmed for the
+  // same reason normalizeHN is: a WME street typed with a trailing space would key as
+  // "celovska_cesta_", match nothing in the eProstor data, and silently drop the whole
+  // street out of the audit while its circles stayed clickable.
   function normalizeStreetName(name) {
-    return String(name).toLowerCase().replace(/\s+/g, '_');
+    return String(name).trim().toLowerCase().replace(/\s+/g, '_');
   }
 
   // Escape HTML special characters for safe attribute insertion
@@ -297,8 +301,11 @@
       // bbox. Auditing a house number outside that bbox would flag valid data as
       // missing purely because we never asked eProstor about it.
       if (rec.x == null || rec.y == null) return;
-      if (rec.x < loadedBbox.minE || rec.x > loadedBbox.maxE ||
-          rec.y < loadedBbox.minN || rec.y > loadedBbox.maxN) return;
+      // Inset by AUDIT_MAX_DISTANCE, not flush to the fetched box. A pin just inside
+      // the edge can legitimately match an eProstor point just outside it — which the
+      // CQL filter never returned — so judging that band produces false "missing".
+      if (rec.x < loadedBbox.minE + AUDIT_MAX_DISTANCE || rec.x > loadedBbox.maxE - AUDIT_MAX_DISTANCE ||
+          rec.y < loadedBbox.minN + AUDIT_MAX_DISTANCE || rec.y > loadedBbox.maxN - AUDIT_MAX_DISTANCE) return;
       let audited = false;
       let numberExistsSomewhere = false;
       let matched = false;
@@ -368,6 +375,12 @@
 
   // Fetch addresses from EProstor API with pagination. shouldAbort (optional)
   // is checked between pages so a Clear / newer Load stops the request chain.
+  //
+  // Resolves { features, complete }. `complete` is false when the result is a partial
+  // answer for the requested box — the page cap was hit, or a page came back invalid
+  // after earlier pages succeeded. Callers must not treat a partial result as
+  // authoritative coverage: the reverse audit would report addresses in the
+  // never-fetched remainder as missing from eProstor.
   function fetchAddresses(minE, minN, maxE, maxN, shouldAbort) {
     return new Promise((resolve, reject) => {
       const allFeatures = [];
@@ -376,13 +389,13 @@
 
       function fetchPage() {
         if (typeof shouldAbort === 'function' && shouldAbort()) {
-          resolve(allFeatures); // caller discards stale results anyway
+          resolve({ features: allFeatures, complete: false }); // caller discards stale results anyway
           return;
         }
         if (++pageCount > EPROSTOR_MAX_PAGES) {
           console.warn(`[SL-HN] EProstor result truncated at ${EPROSTOR_MAX_PAGES} pages — reduce the buffer`);
           toast('Too many addresses in area — result truncated, reduce the buffer', 'warning');
-          resolve(allFeatures);
+          resolve({ features: allFeatures, complete: false });
           return;
         }
         const filter = buildCqlFilter(minE, minN, maxE, maxN);
@@ -403,7 +416,9 @@
 
               if (!data.features || !Array.isArray(data.features)) {
                 if (allFeatures.length > 0) {
-                  resolve(allFeatures);
+                  // Keep what we have, but it is not the whole box.
+                  console.warn('[SL-HN] EProstor returned an invalid page; result is partial');
+                  resolve({ features: allFeatures, complete: false });
                 } else {
                   reject(new Error('Invalid API response'));
                 }
@@ -423,7 +438,7 @@
                 startIndex += returned;
                 fetchPage();
               } else {
-                resolve(allFeatures);
+                resolve({ features: allFeatures, complete: true });
               }
             } catch (err) {
               reject(err);
@@ -1394,6 +1409,12 @@
     }
 
     function onAuditFindingClick(finding) {
+      // Close any open fix-street dialog first, exactly as onFeatureClick does. That
+      // dialog's Rename button acts on the *current* selection, and this function is
+      // about to change it — leaving the dialog open would rename the segment the user
+      // clicked to inspect, into a street name they never chose for it.
+      clearFixStreetState();
+
       try {
         wmeSDK.Map.setMapCenter({ lonLat: { lon: finding.lon, lat: finding.lat } });
       } catch (e) {
@@ -2173,13 +2194,16 @@
             fetchAddresses(minE, minN, maxE, maxN, () => loadId !== currentLoadId),
             getVisibleHNsByStreet()
           ])
-            .then(([apiFeatures, selectionHNMap]) => {
+            .then(([fetchResult, selectionHNMap]) => {
               // Bail out if user clicked Clear (or started a newer load) while the fetch was in flight
               if (loadId !== currentLoadId) {
                 loading.style.display = 'none';
                 resolve();
                 return;
               }
+
+              const apiFeatures = fetchResult.features;
+              const fetchComplete = fetchResult.complete;
 
               const features = [];
 
@@ -2224,11 +2248,15 @@
               }
 
               lastFeatures = features; // computeAuditFindings reads lastFeatures
-              // Record the area eProstor actually answered for. Set here rather than
-              // before the fetch so a failed request doesn't look like coverage: the
-              // audit may only draw conclusions inside this box, and auto-load uses
-              // it to decide whether the selection is already covered.
-              lastLoadedBbox = { minE, minN, maxE, maxN };
+              // Record the area eProstor actually answered for — only when the answer
+              // covered the whole box. A truncated result (page cap, bad page) would
+              // otherwise make the audit call addresses in the unfetched remainder
+              // "missing", and make auto-load consider that remainder already loaded.
+              // null means: no authoritative coverage, so the audit stays silent.
+              lastLoadedBbox = fetchComplete ? { minE, minN, maxE, maxN } : null;
+              if (!fetchComplete) {
+                console.warn('[SL-HN] partial address data: reverse audit disabled for this load');
+              }
               try {
                 lastAuditFindings = computeAuditFindings(lastFeatures, selectionHNMap, lastLoadedBbox);
               } catch (e) {

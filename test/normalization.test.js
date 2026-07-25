@@ -51,6 +51,15 @@ test('buildHouseNumber agrees with normalizeHN, so both sides of a comparison ma
   assert.strictEqual(buildHouseNumber('12', 'a'), normalizeHN('12 a'));
 });
 
+test('normalizeStreetName trims, like normalizeHN', () => {
+  // A WME street typed with a stray space would otherwise key as "celovska_cesta_",
+  // match nothing in the eProstor data, and drop the whole street from the audit.
+  const expected = normalizeStreetName('Celovška cesta');
+  assert.strictEqual(normalizeStreetName('Celovška cesta '), expected);
+  assert.strictEqual(normalizeStreetName(' Celovška cesta'), expected);
+  assert.strictEqual(normalizeStreetName('  Celovška cesta  '), expected);
+});
+
 test('normalizeStreetName lowercases and underscores whitespace', () => {
   assert.strictEqual(normalizeStreetName('Ulica prekomorskih brigad'),
     'ulica_prekomorskih_brigad');

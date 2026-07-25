@@ -132,13 +132,36 @@ test('house numbers outside the fetched bbox are not flagged', () => {
   assert.deepStrictEqual(findings, []);
 });
 
-test('a house number exactly on the bbox edge is still audited', () => {
+test('house numbers within AUDIT_MAX_DISTANCE of the bbox edge are not judged', () => {
+  // The eProstor query used exactly this box, so a pin near the edge can legitimately
+  // match a point just outside it that was never returned. Judging that band reports
+  // valid addresses as missing. An earlier version of this test asserted the opposite
+  // and so pinned the bug in place.
+  for (const [x, y, where] of [
+    [BBOX.maxE, BBOX.maxN, 'exactly on the corner'],
+    [BBOX.minE, BBOX.minN, 'exactly on the opposite corner'],
+    [BBOX.maxE - 5, 500, 'just inside the east edge'],
+    [BBOX.minE + 5, 500, 'just inside the west edge'],
+    [500, BBOX.maxN - 5, 'just inside the north edge'],
+    [500, BBOX.minN + 5, 'just inside the south edge']
+  ]) {
+    const findings = computeAuditFindings(
+      [official('main_st', '12', 100, 100)],
+      wmeIndex({ main_st: [wmeHn({ hnId: '1', num: '99', x, y })] }),
+      BBOX
+    );
+    assert.deepStrictEqual(findings, [], `should not judge a pin ${where}`);
+  }
+});
+
+test('house numbers comfortably inside the bbox are judged', () => {
+  const inset = AUDIT_MAX_DISTANCE + 1;
   const findings = computeAuditFindings(
     [official('main_st', '12', 100, 100)],
-    wmeIndex({ main_st: [wmeHn({ hnId: '1', num: '99', x: BBOX.maxE, y: BBOX.maxN })] }),
+    wmeIndex({ main_st: [wmeHn({ hnId: '1', num: '99', x: BBOX.minE + inset, y: BBOX.minN + inset })] }),
     BBOX
   );
-  assert.strictEqual(findings.length, 1);
+  assert.strictEqual(findings.length, 1, 'just past the inset should still be audited');
 });
 
 test('house numbers without an id are skipped rather than merged', () => {
