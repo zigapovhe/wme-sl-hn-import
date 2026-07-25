@@ -669,6 +669,15 @@
         // top-level shape still works but is deprecated, and SegmentAddressData makes
         // ids and raw names mutually exclusive (`primaryStreetId?: never` in the raw
         // variant), so the two can never be mixed by accident.
+        //
+        // Do not "simplify" this to the raw variant, i.e. addressData: { streetName }.
+        // It looks like it would let WME resolve or create the street and delete the
+        // city lookup above, but the API rejects it:
+        //   ValidationError: cityName is required for raw address updates
+        //                    (use empty string for no city)
+        // So the city still has to be resolved — as a name rather than an id, saving
+        // nothing — and an empty or wrong cityName strips the city off the segment.
+        // Verified against a live segment that already had both street and city.
         wmeSDK.DataModel.Segments.updateAddress({
           segmentId: segment.id,
           addressData: { primaryStreetId: street.id }
