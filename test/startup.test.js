@@ -35,6 +35,11 @@ async function bootScript(storage = {}, whileStubbed = null) {
   const calls = [];
   const layers = new Map();
 
+  // Click handlers registered on panel elements, so tests can fire them. Without
+  // this, every checkbox and button handler is dead code as far as the suite is
+  // concerned — which is how a `ReferenceError` in the NavPoints toggle once shipped.
+  const domHandlers = [];
+
   const element = () => new Proxy(function () {}, {
     get: (t, k) => {
       if (k === 'style') return {};
@@ -42,6 +47,7 @@ async function bootScript(storage = {}, whileStubbed = null) {
       if (k === 'querySelector' || k === 'closest') return () => element();
       if (k === 'querySelectorAll') return () => [];
       if (k === 'hasAttribute') return () => false;
+      if (k === 'addEventListener') return (type, handler) => domHandlers.push({ type, handler });
       if (k === 'innerHTML' || k === 'textContent' || k === 'value') return '';
       return element();
     },
@@ -116,11 +122,11 @@ async function bootScript(storage = {}, whileStubbed = null) {
     // the microtask queue drains.
     new Function('module', fs.readFileSync(SCRIPT_PATH, 'utf8'))({});
     await new Promise(resolve => setTimeout(resolve, 50));
-    if (whileStubbed) await whileStubbed({ calls, layers, handlers });
+    if (whileStubbed) await whileStubbed({ calls, layers, handlers, domHandlers });
   } finally {
     for (const k of Object.keys(globals)) global[k] = saved[k];
   }
-  return { calls, layers, handlers };
+  return { calls, layers, handlers, domHandlers };
 }
 
 test('the script boots without throwing', async () => {
@@ -186,6 +192,19 @@ test('firing every registered handler throws nothing', async () => {
       for (const handler of list) {
         assert.doesNotThrow(() => handler({ x: 0, y: 0 }), `handler for ${eventName} threw`);
       }
+    }
+  });
+});
+
+test('every panel click handler runs without throwing', () => {
+  // Fires each checkbox/button handler the panel registered. This is what catches a
+  // helper that moved out of scope: the handler bodies are never otherwise executed.
+  return bootScript({ 'qhnsl-layer-visible': '1', 'qhnsl-audit': '1' }, ({ domHandlers }) => {
+    assert.ok(domHandlers.length >= 5,
+      `expected the panel to register several handlers, got ${domHandlers.length}`);
+    for (const { type, handler } of domHandlers) {
+      assert.doesNotThrow(() => handler({ preventDefault() {}, stopPropagation() {}, target: {} }),
+        `a "${type}" handler threw`);
     }
   });
 });

@@ -804,6 +804,11 @@
     }
   }
 
+  // wz-checkbox exposes its state as an attribute, not a .checked property. Module
+  // scope because both the main panel and the NavPoints overlay need them.
+  const isChecked  = (el) => el?.hasAttribute('checked');
+  const setChecked = (el, v) => v ? el.setAttribute('checked', '') : el.removeAttribute('checked');
+
   // NavPoints overlay: dashed line from each Waze house-number pin to its anchor on
   // the segment. Self-contained by construction — it takes the sidebar pane and
   // otherwise touches only module-scope helpers, so it lives outside init() rather
@@ -1679,8 +1684,6 @@
       streetAnalysisDiv = tabPane.querySelector('#hn-street-analysis');
       auditSummaryDiv = tabPane.querySelector('#hn-audit-summary');
 
-      const isChecked  = (el) => el?.hasAttribute('checked');
-      const setChecked = (el, v) => v ? el.setAttribute('checked', '') : el.removeAttribute('checked');
 
       bufferEl.value = String(LS.getBuffer());
       if (LS.getLayerVisible()) {
