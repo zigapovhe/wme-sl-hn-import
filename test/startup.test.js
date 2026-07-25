@@ -109,6 +109,9 @@ async function bootScript(storage = {}, whileStubbed = null) {
     getWmeSdk: () => deepStub([]),
     I18n: { translations: { en: { layers: { name: {} } } }, currentLocale: () => 'en' },
     proj4: Object.assign((from, to, c) => [c[0] * 1000, c[1] * 1000], { defs: () => {} }),
+    // Needed by the toast renderer. Without it every toast fails inside its own
+    // try/catch, so that path would look exercised while never actually running.
+    requestAnimationFrame: (fn) => setTimeout(fn, 0),
     GM_xmlhttpRequest() {}, GM_setClipboard() {},
     localStorage: {
       getItem: (k) => (k in storage ? storage[k] : null),

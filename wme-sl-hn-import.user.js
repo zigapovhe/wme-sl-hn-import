@@ -105,15 +105,47 @@
     setAutoLoad(v)    { localStorage.setItem('qhnsl-autoload', v ? '1' : '0'); }
   };
 
+  const TOAST_COLORS = {
+    info:    { bg: '#e7f1ff', border: '#5b9bd5', text: '#12385e' },
+    success: { bg: '#d4edda', border: '#28a745', text: '#155724' },
+    warning: { bg: '#fff3cd', border: '#ffc107', text: '#7a5b00' },
+    error:   { bg: '#f8d7da', border: '#dc3545', text: '#721c24' }
+  };
+  const TOAST_TIMEOUT_MS = 4000;
+
+  // Self-rolled because the SDK has no notifications API: its class list is
+  // BigJunctions … Sidebar, States, Streets, Venues, with nothing for toasts. The
+  // previous wmeSDK.Notifications.show call could never fire, so every message the
+  // script tried to show — including "result truncated, reduce the buffer" — went only
+  // to the console where nobody was looking. Built with plain DOM, like the
+  // fix-street dialog, so it depends on nothing else being installed.
+  let toastHost = null;
   const toast = (msg, type = 'info') => {
+    console.info(`[SL-HN] ${msg}`); // keep the console trail for debugging
     try {
-      if (wmeSDK?.Notifications?.show) {
-        wmeSDK.Notifications.show({ text: msg, type, timeout: 3500 });
-      } else {
-        console.info(`[SL-HN] ${msg}`);
+      if (!toastHost) {
+        toastHost = document.createElement('div');
+        toastHost.style.cssText = 'position:fixed;top:70px;right:16px;z-index:10001;'
+          + 'display:flex;flex-direction:column;gap:6px;align-items:flex-end;'
+          + 'pointer-events:none;max-width:340px;';
+        document.body.appendChild(toastHost);
       }
-    } catch (_) {
-      console.info(`[SL-HN] ${msg}`);
+
+      const colors = TOAST_COLORS[type] || TOAST_COLORS.info;
+      const el = document.createElement('div');
+      el.textContent = msg; // textContent, not innerHTML: messages interpolate street names
+      el.style.cssText = `background:${colors.bg};border:1px solid ${colors.border};`
+        + `color:${colors.text};border-radius:4px;padding:8px 12px;font-size:12px;`
+        + 'box-shadow:0 2px 6px rgba(0,0,0,0.2);opacity:0;transition:opacity 150ms;';
+      toastHost.appendChild(el);
+      requestAnimationFrame(() => { el.style.opacity = '1'; });
+
+      setTimeout(() => {
+        el.style.opacity = '0';
+        setTimeout(() => el.remove(), 200);
+      }, TOAST_TIMEOUT_MS);
+    } catch (e) {
+      console.debug('[SL-HN] toast render failed:', e);
     }
   };
 
@@ -2524,7 +2556,6 @@
       const optional = [
         'Map.setLayerZIndex',          // street labels sink under other overlays
         'Map.setMapCenter',            // audit clicks select but do not recentre
-        'Notifications.show',          // toasts fall back to console
         'Shortcuts.createShortcut',    // keyboard shortcuts unavailable
         'Shortcuts.deleteShortcut',
         'Events.trackDataModelEvents', // live un-fade on external HN edits
