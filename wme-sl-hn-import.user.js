@@ -39,6 +39,9 @@
   const SDK_NAVPOINTS_LAYER_NAME = 'qhnsl-navpoints';
 
   const MAX_CLICK_DISTANCE_PX = 25;
+
+  // Below this zoom the overlays are hidden: the markers would overlap into noise.
+  const MIN_OVERLAY_ZOOM = 18;
   const MAX_HN_CONFLICT_DISTANCE = 10;
 
   // A WME house number counts as matched only if eProstor has that number on the
@@ -205,15 +208,6 @@
     return sel.ids
       .map(id => wmeSDK.DataModel.Segments.getById({ segmentId: id }))
       .filter(Boolean);
-  }
-
-  // Drop a layer's features and forget their ids. Returns the new (empty) id list,
-  // so every caller is one line: ids = clearLayerFeatures(LAYER, ids).
-  function clearLayerFeatures(layerName, featureIds) {
-    if (featureIds && featureIds.length) {
-      wmeSDK.Map.removeFeaturesFromLayer({ layerName, featureIds });
-    }
-    return [];
   }
 
   // The single normalization rule for comparing house numbers. Both sides of
@@ -829,15 +823,35 @@
     let streets = {};
     let lastFeatures = [];
     let fixStreetHighlightStreetId = null; // official street ID whose HNs are highlighted during fix-street flow
-    let lastSdkFeatureIds = [];
-    let lastStreetLabelIds = [];
     let lastAuditFindings = [];
-    let lastAuditFeatureIds = [];
-    let userWantsAudit = LS.getAudit();
     let isLoading = false;
     let currentLoadId = 0;
-    let userWantsLayerVisible = false;
-    let userWantsStreetNames = LS.getStreetNames();
+
+    // One record per map overlay, replacing three parallel sets of variables.
+    //   wanted — the user's toggle for this overlay
+    //   shown  — what we last told the SDK, so we only call it on a real change
+    //   ids    — the feature ids currently on the layer
+    // Per-overlay quirks (the zoom toast, lifting labels above other scripts) stay
+    // at their call sites rather than becoming fields here.
+    // Namespaced deliberately: `hn` alone is used ~78 times in this file to mean
+    // "house number", so a bare `hn` overlay would shadow and mislead.
+    const overlays = {
+      hn:     { name: SDK_LAYER_NAME,             wanted: false,               shown: false, ids: [] },
+      labels: { name: SDK_STREETNAMES_LAYER_NAME, wanted: LS.getStreetNames(), shown: false, ids: [] },
+      audit:  { name: SDK_AUDIT_LAYER_NAME,       wanted: LS.getAudit(),       shown: false, ids: [] }
+    };
+
+    // Replace a layer's features in one step. Ids are recorded before the SDK call
+    // that can throw: unrecorded ids would survive every Clear and Load.
+    function setOverlayFeatures(overlay, features) {
+      if (overlay.ids.length) {
+        wmeSDK.Map.removeFeaturesFromLayer({ layerName: overlay.name, featureIds: overlay.ids });
+        overlay.ids = [];
+      }
+      if (!features.length) return;
+      overlay.ids = features.map(f => f.id);
+      wmeSDK.Map.addFeaturesToLayer({ layerName: overlay.name, features });
+    }
     let streetNameSpan = null;
     let currentStreetDiv = null;
     let streetAnalysisDiv = null;
@@ -902,37 +916,30 @@
     }
     liftLabelLayer();
 
-    let lastComputedVisibility = false;
-    let lastComputedStreetVis = false;
-    let lastComputedAuditVis = false;
     function updateLayerVisibility() {
-      const currentZoom = wmeSDK.Map.getZoomLevel();
-      const shouldBeVisible = userWantsLayerVisible && currentZoom >= 18;
-      // Street names ride the HN layer's gate, plus their own toggle.
-      const streetShouldBeVisible = shouldBeVisible && userWantsStreetNames;
+      const zoomOk = wmeSDK.Map.getZoomLevel() >= MIN_OVERLAY_ZOOM;
+      // hn is the base gate; the other two ride it plus their own toggle.
+      const hnVisible = overlays.hn.wanted && zoomOk;
+      const desired = new Map([
+        [overlays.hn, hnVisible],
+        [overlays.labels, hnVisible && overlays.labels.wanted],
+        [overlays.audit, hnVisible && overlays.audit.wanted]
+      ]);
 
-      if (shouldBeVisible !== lastComputedVisibility) {
-        lastComputedVisibility = shouldBeVisible;
-        wmeSDK.Map.setLayerVisibility({ layerName: SDK_LAYER_NAME, visibility: shouldBeVisible });
-        if (userWantsLayerVisible && !shouldBeVisible && lastFeatures.length > 0) {
-          toast('Zoom in to level 18+ to see house numbers', 'info');
+      for (const [overlay, visible] of desired) {
+        if (visible === overlay.shown) continue;
+        overlay.shown = visible;
+        wmeSDK.Map.setLayerVisibility({ layerName: overlay.name, visibility: visible });
+        // Only the base layer explains itself: hiding the other two is always a
+        // deliberate toggle, never a surprise.
+        if (overlay === overlays.hn && overlays.hn.wanted && !visible && lastFeatures.length > 0) {
+          toast(`Zoom in to level ${MIN_OVERLAY_ZOOM}+ to see house numbers`, 'info');
         }
       }
 
-      if (streetShouldBeVisible !== lastComputedStreetVis) {
-        lastComputedStreetVis = streetShouldBeVisible;
-        wmeSDK.Map.setLayerVisibility({ layerName: SDK_STREETNAMES_LAYER_NAME, visibility: streetShouldBeVisible });
-      }
-
-      const auditShouldBeVisible = shouldBeVisible && userWantsAudit;
-      if (auditShouldBeVisible !== lastComputedAuditVis) {
-        lastComputedAuditVis = auditShouldBeVisible;
-        wmeSDK.Map.setLayerVisibility({ layerName: SDK_AUDIT_LAYER_NAME, visibility: auditShouldBeVisible });
-      }
-
-      // Runs on every pan/zoom: reclaims the top spot if another script's layer
-      // load reshuffled z-indexes since the last time we looked.
-      if (streetShouldBeVisible) liftLabelLayer();
+      // Runs on every pan/zoom, not just on change: reclaims the top spot if another
+      // script's layer load reshuffled z-indexes since the last time we looked.
+      if (desired.get(overlays.labels)) liftLabelLayer();
     }
 
     wmeSDK.Events.on({ eventName: 'wme-map-zoom-changed', eventHandler: updateLayerVisibility });
@@ -1231,9 +1238,9 @@
     }
 
     function handleMapClick(evt) {
-      // lastComputedVisibility is false when the layer is hidden (e.g. zoom < 18):
+      // overlays.hn.shown is false when the layer is hidden (e.g. zoom < 18):
       // no visible circles means clicks must do nothing.
-      if (!userWantsLayerVisible || !lastComputedVisibility || !lastFeatures.length) return;
+      if (!overlays.hn.wanted || !overlays.hn.shown || !lastFeatures.length) return;
       if (evt == null || evt.x == null || evt.y == null) return;
 
       const MAX_PIXELS_SQ = MAX_CLICK_DISTANCE_PX * MAX_CLICK_DISTANCE_PX;
@@ -1244,7 +1251,7 @@
       // winning on mere presence would make the neighbouring address unclickable.
       let bestAudit = null;
       let bestAuditDistSq = Infinity;
-      if (userWantsAudit && lastComputedAuditVis && lastAuditFindings.length) {
+      if (overlays.audit.wanted && overlays.audit.shown && lastAuditFindings.length) {
         for (const f of lastAuditFindings) {
           if (!isAuditFindingVisible(f)) continue;
           const px = wmeSDK.Map.getMapPixelFromLonLat({ lonLat: { lon: f.lon, lat: f.lat } });
@@ -1506,14 +1513,14 @@
       bufferEl.value = String(LS.getBuffer());
       if (LS.getLayerVisible()) {
         setChecked(chkVis, true);
-        userWantsLayerVisible = true;
+        overlays.hn.wanted = true;
         updateLayerVisibility();
       }
       if (LS.getSelectedOnly()) {
         setChecked(chkSelectedOnly, true);
       }
-      setChecked(chkStreetNames, userWantsStreetNames);
-      setChecked(chkAudit, userWantsAudit);
+      setChecked(chkStreetNames, overlays.labels.wanted);
+      setChecked(chkAudit, overlays.audit.wanted);
       setChecked(chkAutoLoad, LS.getAutoLoad());
       setChecked(chkNavPoints, LS.getNavPoints());
 
@@ -1529,7 +1536,7 @@
       chkVis.addEventListener('click', () => {
         const on = isChecked(chkVis);
         setChecked(chkVis, !on);
-        userWantsLayerVisible = !on;
+        overlays.hn.wanted = !on;
         LS.setLayerVisible(!on);
         updateLayerVisibility();
       });
@@ -1542,7 +1549,7 @@
       chkStreetNames.addEventListener('click', () => {
         const on = !isChecked(chkStreetNames);
         setChecked(chkStreetNames, on);
-        userWantsStreetNames = on;
+        overlays.labels.wanted = on;
         LS.setStreetNames(on);
         updateLayerVisibility();
       });
@@ -1550,7 +1557,7 @@
       chkAudit.addEventListener('click', () => {
         const on = !isChecked(chkAudit);
         setChecked(chkAudit, on);
-        userWantsAudit = on;
+        overlays.audit.wanted = on;
         LS.setAudit(on);
         updateLayerVisibility();
         renderAuditFindings();
@@ -1586,9 +1593,9 @@
         btnLoad.disabled = true;
         btnLoadLabel.textContent = 'Loading…';
 
-        lastSdkFeatureIds = clearLayerFeatures(SDK_LAYER_NAME, lastSdkFeatureIds);
-        lastStreetLabelIds = clearLayerFeatures(SDK_STREETNAMES_LAYER_NAME, lastStreetLabelIds);
-        lastAuditFeatureIds = clearLayerFeatures(SDK_AUDIT_LAYER_NAME, lastAuditFeatureIds);
+        setOverlayFeatures(overlays.hn, []);
+        setOverlayFeatures(overlays.labels, []);
+        setOverlayFeatures(overlays.audit, []);
         lastAuditFindings = [];
         streets = {};
         streetNames = {};
@@ -1606,7 +1613,7 @@
           // hid, just because they selected a segment, would be surprising. The data
           // is loaded either way and appears as soon as they tick Show layer.
           if (!auto) {
-            userWantsLayerVisible = true;
+            overlays.hn.wanted = true;
             setChecked(chkVis, true);
             LS.setLayerVisible(true);
           }
@@ -1675,17 +1682,17 @@
       function clearLayer() {
         clearFixStreetState();
         currentLoadId++; // invalidate any in-flight load so its results are discarded
-        lastSdkFeatureIds = clearLayerFeatures(SDK_LAYER_NAME, lastSdkFeatureIds);
-        lastStreetLabelIds = clearLayerFeatures(SDK_STREETNAMES_LAYER_NAME, lastStreetLabelIds);
-        lastAuditFeatureIds = clearLayerFeatures(SDK_AUDIT_LAYER_NAME, lastAuditFeatureIds);
+        setOverlayFeatures(overlays.hn, []);
+        setOverlayFeatures(overlays.labels, []);
+        setOverlayFeatures(overlays.audit, []);
         lastAuditFindings = [];
         if (auditSummaryDiv) auditSummaryDiv.style.display = 'none';
         // Cancel any armed auto-load, or it fires after this and silently undoes
         // the Clear the user just asked for.
         if (autoLoadTimer) { clearTimeout(autoLoadTimer); autoLoadTimer = null; }
         lastLoadedBbox = null; // no reference data any more, so the audit must stay silent
-        userWantsLayerVisible = false;
-        updateLayerVisibility(); // keeps lastComputedVisibility in sync (a direct setLayerVisibility here left it stale)
+        overlays.hn.wanted = false;
+        updateLayerVisibility(); // keeps overlays.hn.shown in sync (a direct setLayerVisibility here left it stale)
         setChecked(chkVis, false);
         LS.setLayerVisible(false);
         streets = {};
@@ -1700,30 +1707,22 @@
       btnClear.addEventListener('click', clearLayer);
 
       function renderAuditFindings() {
-        lastAuditFeatureIds = clearLayerFeatures(SDK_AUDIT_LAYER_NAME, lastAuditFeatureIds);
-
         // Disabled means silent: no markers and no summary. Reporting counts for a
         // feature the user switched off tells them about problems they cannot see.
-        if (!userWantsAudit) {
+        if (!overlays.audit.wanted) {
+          setOverlayFeatures(overlays.audit, []);
           if (auditSummaryDiv) auditSummaryDiv.style.display = 'none';
           return;
         }
 
         const visibleFindings = lastAuditFindings.filter(isAuditFindingVisible);
 
-        const sdkFeatures = visibleFindings.map(f => ({
+        setOverlayFeatures(overlays.audit, visibleFindings.map(f => ({
           type: 'Feature',
           id: `qhnsl-audit-${f.hnId}`,
           geometry: { type: 'Point', coordinates: [f.lon, f.lat] },
           properties: { number: f.number, type: f.type, segmentId: f.segmentId }
-        }));
-
-        if (sdkFeatures.length) {
-          // Record ids before the call that can throw: on failure the features may
-          // already be on the layer, and unrecorded ids survive every Clear and Load.
-          lastAuditFeatureIds = sdkFeatures.map(f => f.id);
-          wmeSDK.Map.addFeaturesToLayer({ layerName: SDK_AUDIT_LAYER_NAME, features: sdkFeatures });
-        }
+        })));
 
         if (!auditSummaryDiv) return;
         if (!visibleFindings.length) {
@@ -1739,8 +1738,7 @@
 
       applyFeatureFilter = function () {
         const visible = lastFeatures.filter(isFeatureVisible);
-        lastSdkFeatureIds = clearLayerFeatures(SDK_LAYER_NAME, lastSdkFeatureIds);
-        const visibleSdk = visible.map((feat, i) => ({
+        setOverlayFeatures(overlays.hn, visible.map((feat, i) => ({
           type: 'Feature',
           id: `qhnsl-${i}`,
           geometry: { type: 'Point', coordinates: [feat.lon, feat.lat] },
@@ -1752,13 +1750,10 @@
             isSelectedStreet: feat.street === currentStreetId,
             fixHighlight: fixStreetHighlightStreetId != null && feat.street === fixStreetHighlightStreetId
           }
-        }));
-        wmeSDK.Map.addFeaturesToLayer({ layerName: SDK_LAYER_NAME, features: visibleSdk });
-        lastSdkFeatureIds = visibleSdk.map(f => f.id);
+        })));
 
         // One street-name label per street, anchored at the centroid of that
         // street's visible house-number points.
-        lastStreetLabelIds = clearLayerFeatures(SDK_STREETNAMES_LAYER_NAME, lastStreetLabelIds);
         const byStreet = new Map();
         visible.forEach(feat => {
           let g = byStreet.get(feat.street);
@@ -1783,11 +1778,8 @@
         // addHouseNumberToSegment's try block: an unguarded throw here would report
         // a house number that was actually added as a failure.
         try {
-          if (labelSdk.length) {
-            lastStreetLabelIds = labelSdk.map(f => f.id);
-            wmeSDK.Map.addFeaturesToLayer({ layerName: SDK_STREETNAMES_LAYER_NAME, features: labelSdk });
-            liftLabelLayer();
-          }
+          setOverlayFeatures(overlays.labels, labelSdk);
+          if (labelSdk.length) liftLabelLayer();
         } catch (e) {
           console.warn('[SL-HN] street label render failed:', e);
         }
@@ -2259,7 +2251,7 @@
                 hideCurrentStreet();
               }
 
-              lastSdkFeatureIds = clearLayerFeatures(SDK_LAYER_NAME, lastSdkFeatureIds);
+              setOverlayFeatures(overlays.hn, []);
 
               applyFeatureFilter();
               analyzeStreetMatches();
