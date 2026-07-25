@@ -42,6 +42,9 @@
 
   // Below this zoom the overlays are hidden: the markers would overlap into noise.
   const MIN_OVERLAY_ZOOM = 18;
+
+  // Auto-load debounce: click-dragging across several segments should cost one fetch.
+  const AUTO_LOAD_DEBOUNCE_MS = 400;
   const MAX_HN_CONFLICT_DISTANCE = 10;
 
   // A WME house number counts as matched only if eProstor has that number on the
@@ -49,10 +52,16 @@
   // misplaced rather than missing.
   const AUDIT_MAX_DISTANCE = 30;
 
-  // Waze road types house numbers should never attach to:
-  // 5 walking trail / routable pedestrian path, 10 pedestrian boardwalk,
-  // 16 stairway, 18 railroad, 19 runway/taxiway
-  const NON_ADDRESSABLE_ROAD_TYPES = new Set([5, 10, 16, 18, 19]);
+  // Waze road types house numbers should never attach to, using the ids from the
+  // SDK's ROAD_TYPE constant:
+  //   5  WALKING_TRAIL         10 PEDESTRIAN_BOARDWALK
+  //   9  WALKWAY               16 STAIRWAY
+  //   18 RAILROAD              19 RUNWAY_TAXIWAY
+  // WALKWAY (9) is the non-routable pedestrian type and the most common pedestrian
+  // geometry in Slovenian residential areas — without it a courtyard path that
+  // happens to be nearer than the real street could take the house number, and
+  // could then be renamed by the fix-street flow, which shares this matching.
+  const NON_ADDRESSABLE_ROAD_TYPES = new Set([5, 9, 10, 16, 18, 19]);
 
   // A name-matched segment counts as "suspiciously far" when it is farther than
   // FAR_STREET_MIN_DISTANCE meters AND more than FAR_STREET_RATIO times farther
@@ -366,6 +375,29 @@
       maxE: Math.ceil(trE + buffer),
       maxN: Math.ceil(trN + buffer)
     };
+  }
+
+  // True when every point of every selected segment lies inside `bbox` (EPSG:3794),
+  // i.e. we already hold reference data covering that selection.
+  //
+  // Answers false unless it actually verified at least one point. Claiming coverage
+  // after examining nothing — no geometry, or NaN coordinates where every comparison
+  // is false — made auto-load silently stop fetching.
+  // proj4 is injectable so this stays testable outside the browser.
+  function isSelectionInsideBbox(segments, bbox, project = proj4) {
+    if (!bbox) return false;
+    let checked = 0;
+    for (const seg of segments || []) {
+      const coords = seg?.geometry?.coordinates;
+      if (!Array.isArray(coords)) continue;
+      for (const pt of coords) {
+        const [e, n] = project('EPSG:4326', 'EPSG:3794', [pt[0], pt[1]]);
+        if (!Number.isFinite(e) || !Number.isFinite(n)) return false;
+        checked++;
+        if (e < bbox.minE || e > bbox.maxE || n < bbox.minN || n > bbox.maxN) return false;
+      }
+    }
+    return checked > 0;
   }
 
   // Build CQL filter for coordinate bounds (excludes apartments)
@@ -888,8 +920,12 @@
     }
 
     async function renderNavPoints() {
-      if (!LS.getNavPoints()) { clearNavLayer(); return; }
-      if (wmeSDK.Map.getZoomLevel() < 18) { clearNavLayer(); return; }
+      // Bump the generation BEFORE bailing out, or an in-flight render started at a
+      // higher zoom finishes its await, still passes its own generation check, and
+      // draws NavPoints onto a map that has since zoomed out past the threshold.
+      // The checkbox handler already does this; these early exits must match.
+      if (!LS.getNavPoints()) { currentRenderId++; clearNavLayer(); return; }
+      if (wmeSDK.Map.getZoomLevel() < MIN_OVERLAY_ZOOM) { currentRenderId++; clearNavLayer(); return; }
 
       const myRenderId = ++currentRenderId;
 
@@ -1033,16 +1069,29 @@
       audit:  { name: SDK_AUDIT_LAYER_NAME,       wanted: LS.getAudit(),       shown: false, ids: [] }
     };
 
-    // Replace a layer's features in one step. Ids are recorded before the SDK call
-    // that can throw: unrecorded ids would survive every Clear and Load.
+    // Replace a layer's features in one step.
+    //
+    // Failures are contained here rather than at each call site. Rendering is
+    // display-only, but applyFeatureFilter runs inside addHouseNumberToSegment's try
+    // block — so an escaping throw would report a house number that was genuinely
+    // added as a failure. Two of the three call sites wrapped this; the house-number
+    // one did not, which is exactly the kind of gap a central guarantee closes.
+    //
+    // Ids are recorded before the add: if it throws part-way, some features may
+    // already be on the layer, and later removing an id that was never added is
+    // harmless, while leaving an orphan behind is not.
     function setOverlayFeatures(overlay, features) {
-      if (overlay.ids.length) {
-        wmeSDK.Map.removeFeaturesFromLayer({ layerName: overlay.name, featureIds: overlay.ids });
-        overlay.ids = [];
+      try {
+        if (overlay.ids.length) {
+          wmeSDK.Map.removeFeaturesFromLayer({ layerName: overlay.name, featureIds: overlay.ids });
+          overlay.ids = [];
+        }
+        if (!features.length) return;
+        overlay.ids = features.map(f => f.id);
+        wmeSDK.Map.addFeaturesToLayer({ layerName: overlay.name, features });
+      } catch (e) {
+        console.warn(`[SL-HN] rendering ${overlay.name} failed:`, e);
       }
-      if (!features.length) return;
-      overlay.ids = features.map(f => f.id);
-      wmeSDK.Map.addFeaturesToLayer({ layerName: overlay.name, features });
     }
     let streetNameSpan = null;
     let currentStreetDiv = null;
@@ -1786,59 +1835,55 @@
         clearFixStreetState();
         isLoading = true;
         const myLoadId = ++currentLoadId;
-        btnLoad.disabled = true;
-        btnLoadLabel.textContent = 'Loading…';
 
-        setOverlayFeatures(overlays.hn, []);
-        setOverlayFeatures(overlays.labels, []);
-        setOverlayFeatures(overlays.audit, []);
-        lastAuditFindings = [];
-        streets = {};
-        streetNames = {};
-        currentStreetId = null;
-        lastFeatures = [];
-        streetAnalysisDiv.style.display = 'none';
-        if (auditSummaryDiv) auditSummaryDiv.style.display = 'none';
+        // Everything below must run under try/finally. Without it a single throw —
+        // an SDK removeFeaturesFromLayer, an unprotected DOM write — leaves isLoading
+        // true forever, which rejects every later Load, silently kills auto-load, and
+        // strands the button on "Loading…" until the page is reloaded.
+        try {
+          btnLoad.disabled = true;
+          btnLoadLabel.textContent = 'Loading…';
 
-        await updateLayer(statusDiv, myLoadId).catch(err => console.warn('[SL-HN] updateLayer:', err));
+          setOverlayFeatures(overlays.hn, []);
+          setOverlayFeatures(overlays.labels, []);
+          setOverlayFeatures(overlays.audit, []);
+          lastAuditFindings = [];
+          streets = {};
+          streetNames = {};
+          currentStreetId = null;
+          lastFeatures = [];
+          // Reset coverage too: until this load succeeds we hold no authoritative data,
+          // and a stale box would let auto-load treat the area as already fetched.
+          lastLoadedBbox = null;
+          streetAnalysisDiv.style.display = 'none';
+          if (auditSummaryDiv) auditSummaryDiv.style.display = 'none';
 
-        // Skip post-load side effects if user clicked Clear (or another Load) mid-fetch
-        if (myLoadId === currentLoadId) {
-          // Pressing Load is an explicit request to see the result, so it forces the
-          // layer on. An auto-load is not: silently re-showing an overlay the user
-          // hid, just because they selected a segment, would be surprising. The data
-          // is loaded either way and appears as soon as they tick Show layer.
-          if (!auto) {
-            overlays.hn.wanted = true;
-            setChecked(chkVis, true);
-            LS.setLayerVisible(true);
+          await updateLayer(statusDiv, myLoadId).catch(err => console.warn('[SL-HN] updateLayer:', err));
+
+          // Skip post-load side effects if user clicked Clear (or another Load) mid-fetch
+          if (myLoadId === currentLoadId) {
+            // Pressing Load is an explicit request to see the result, so it forces the
+            // layer on. An auto-load is not: silently re-showing an overlay the user
+            // hid, just because they selected a segment, would be surprising. The data
+            // is loaded either way and appears as soon as they tick Show layer.
+            if (!auto) {
+              overlays.hn.wanted = true;
+              setChecked(chkVis, true);
+              LS.setLayerVisible(true);
+            }
+            updateLayerVisibility();
           }
-          updateLayerVisibility();
+        } finally {
+          btnLoad.disabled = false;
+          btnLoadLabel.textContent = 'Load selected street';
+          isLoading = false;
         }
-
-        btnLoad.disabled = false;
-        btnLoadLabel.textContent = 'Load selected street';
-        isLoading = false;
       }
 
       // Wrapped, not passed directly: the click event would arrive as the options argument.
       btnLoad.addEventListener('click', () => loadSelectedStreet());
 
-      // True when every point of the selection already lies inside the area
-      // eProstor was fetched for, i.e. we already hold reference data for it.
-      function selectionCoveredByLoadedBbox(selected) {
-        if (!lastLoadedBbox) return false;
-        for (const seg of selected) {
-          const coords = seg.geometry?.coordinates;
-          if (!Array.isArray(coords)) continue;
-          for (const pt of coords) {
-            const [e, n] = proj4('EPSG:4326', 'EPSG:3794', [pt[0], pt[1]]);
-            if (e < lastLoadedBbox.minE || e > lastLoadedBbox.maxE ||
-                n < lastLoadedBbox.minN || n > lastLoadedBbox.maxN) return false;
-          }
-        }
-        return true;
-      }
+      const selectionCoveredByLoadedBbox = (selected) => isSelectionInsideBbox(selected, lastLoadedBbox);
 
       // Auto-load fires on selection change, never on pan: updateLayer derives its
       // bbox from the selected segment, and auto-fetching per pan would hammer the
@@ -1847,7 +1892,6 @@
       // lives in this closure.
       function maybeAutoLoad() {
         if (!LS.getAutoLoad() || isLoading) return;
-        if (Date.now() < suppressAutoLoadUntil) return; // our own setSelection
 
         const selected = getSelectedSegments();
         if (selected.length === 0) return;
@@ -1859,18 +1903,33 @@
         if (selectionCoveredByLoadedBbox(selected)) return;
 
         // Debounce: click-dragging across segments must fire one fetch, not many.
+        // The suppression window is deliberately NOT checked here — a real selection
+        // arriving while one of our own setSelection calls is still settling used to be
+        // dropped outright, and since every house-number add calls markSelfSelection,
+        // click-add-move-on work suppressed auto-load indefinitely. Arm the timer and
+        // let the deferred check decide.
         if (autoLoadTimer) clearTimeout(autoLoadTimer);
-        autoLoadTimer = setTimeout(() => {
-          autoLoadTimer = null;
-          // Re-validate: during the debounce the user may have deselected, turned
-          // auto-load off, or another load may have started.
-          if (!LS.getAutoLoad() || isLoading) return;
-          if (Date.now() < suppressAutoLoadUntil) return;
-          const stillSelected = getSelectedSegments();
-          if (stillSelected.length === 0) return;
-          if (selectionCoveredByLoadedBbox(stillSelected)) return;
-          loadSelectedStreet({ auto: true }).catch(err => console.warn('[SL-HN] auto-load failed:', err));
-        }, 400);
+        autoLoadTimer = setTimeout(runAutoLoad, AUTO_LOAD_DEBOUNCE_MS);
+      }
+
+      function runAutoLoad() {
+        autoLoadTimer = null;
+        // Re-validate: during the debounce the user may have deselected, turned
+        // auto-load off, or another load may have started.
+        if (!LS.getAutoLoad() || isLoading) return;
+
+        // Still inside a self-selection window: re-arm rather than drop, so a genuine
+        // selection made during it is honoured once the window closes.
+        const waitLeft = suppressAutoLoadUntil - Date.now();
+        if (waitLeft > 0) {
+          autoLoadTimer = setTimeout(runAutoLoad, waitLeft + 50);
+          return;
+        }
+
+        const stillSelected = getSelectedSegments();
+        if (stillSelected.length === 0) return;
+        if (selectionCoveredByLoadedBbox(stillSelected)) return;
+        loadSelectedStreet({ auto: true }).catch(err => console.warn('[SL-HN] auto-load failed:', err));
       }
 
       wmeSDK.Events.on({ eventName: 'wme-selection-changed', eventHandler: maybeAutoLoad });
@@ -1933,7 +1992,12 @@
       }
 
       applyFeatureFilter = function () {
-        const visible = lastFeatures.filter(isFeatureVisible);
+        // Drop unplottable points before handing them to the SDK: one bad coordinate
+        // makes it reject the whole batch, which would take out every circle. The
+        // label path already guards its centroids for the same reason.
+        const visible = lastFeatures
+          .filter(isFeatureVisible)
+          .filter(feat => Number.isFinite(feat.lon) && Number.isFinite(feat.lat));
         setOverlayFeatures(overlays.hn, visible.map((feat, i) => ({
           type: 'Feature',
           id: `qhnsl-${i}`,
@@ -2106,10 +2170,18 @@
               let changed = false;
               (payload.objectIds || []).forEach(rawId => {
                 const id = String(rawId);
+                // Unconditional: a house number reappearing is no longer deleted,
+                // whether we added it or not. Nesting this inside the hnIdToAddedKey
+                // guard below meant undoing the deletion of a SAVED house number left
+                // it flagged forever — it stayed hidden from the WME index, so its
+                // circle showed as missing and one click created a duplicate.
+                // Set.delete reports whether it removed anything, so the UI refreshes
+                // for this case too rather than waiting for an unrelated event.
+                if (deletedHnIds.delete(id)) changed = true;
+
                 const key = hnIdToAddedKey.get(id);
                 if (key != null && !sessionAddedKeys.has(key)) {
                   sessionAddedKeys.add(key);
-                  deletedHnIds.delete(id);
                   changed = true;
                 }
               });
@@ -2441,6 +2513,8 @@
       hasConflict,
       computeAuditFindings,
       computeFetchBbox,
+      isSelectionInsideBbox,
+      NON_ADDRESSABLE_ROAD_TYPES,
       AUDIT_MAX_DISTANCE,
       MAX_HN_CONFLICT_DISTANCE
     };

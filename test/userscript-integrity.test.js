@@ -64,7 +64,8 @@ test('only pure functions are exported', () => {
   const exported = require(SCRIPT_PATH);
   const allowed = new Set([
     'normalizeHN', 'buildHouseNumber', 'normalizeStreetName', 'buildCqlFilter',
-    'hasConflict', 'computeAuditFindings', 'computeFetchBbox',
+    'hasConflict', 'computeAuditFindings', 'computeFetchBbox', 'isSelectionInsideBbox',
+    'NON_ADDRESSABLE_ROAD_TYPES',
     'AUDIT_MAX_DISTANCE', 'MAX_HN_CONFLICT_DISTANCE'
   ]);
   for (const key of Object.keys(exported)) {

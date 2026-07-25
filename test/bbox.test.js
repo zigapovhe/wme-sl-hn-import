@@ -65,3 +65,47 @@ test('negative coordinates are handled', () => {
     maxN: 4000 + 100
   });
 });
+
+const { isSelectionInsideBbox, NON_ADDRESSABLE_ROAD_TYPES } = require('../wme-sl-hn-import.user.js');
+
+test('a selection fully inside the box counts as covered', () => {
+  const bbox = { minE: 0, minN: 0, maxE: 100000, maxN: 100000 };
+  assert.strictEqual(isSelectionInsideBbox([segment([[10, 20], [11, 21]])], bbox, project), true);
+});
+
+test('a selection reaching outside the box is not covered', () => {
+  const bbox = { minE: 0, minN: 0, maxE: 10500, maxN: 100000 };
+  assert.strictEqual(isSelectionInsideBbox([segment([[10, 20], [11, 21]])], bbox, project), false);
+});
+
+test('coverage is false unless at least one point was verified', () => {
+  // The bug this guards: returning true after examining nothing claimed coverage that
+  // was never checked, and auto-load silently stopped fetching.
+  const bbox = { minE: 0, minN: 0, maxE: 100000, maxN: 100000 };
+  assert.strictEqual(isSelectionInsideBbox([], bbox, project), false, 'empty selection');
+  assert.strictEqual(isSelectionInsideBbox([{}], bbox, project), false, 'segment with no geometry');
+  assert.strictEqual(isSelectionInsideBbox([{ geometry: { coordinates: [] } }], bbox, project), false,
+    'geometry with no points');
+});
+
+test('NaN coordinates are not treated as covered', () => {
+  const bbox = { minE: 0, minN: 0, maxE: 100000, maxN: 100000 };
+  const nanProject = () => [NaN, NaN];
+  assert.strictEqual(isSelectionInsideBbox([segment([[10, 20]])], bbox, nanProject), false);
+});
+
+test('no bbox means nothing is covered', () => {
+  assert.strictEqual(isSelectionInsideBbox([segment([[10, 20]])], null, project), false);
+});
+
+test('pedestrian road types are excluded from house-number attachment', () => {
+  // Ids from the SDK ROAD_TYPE constant. WALKWAY (9) is the one that was missing and
+  // is the most common pedestrian geometry in Slovenian residential areas.
+  for (const [id, name] of [[5, 'WALKING_TRAIL'], [9, 'WALKWAY'], [10, 'PEDESTRIAN_BOARDWALK'],
+                            [16, 'STAIRWAY'], [18, 'RAILROAD'], [19, 'RUNWAY_TAXIWAY']]) {
+    assert.ok(NON_ADDRESSABLE_ROAD_TYPES.has(id), `${name} (${id}) must be excluded`);
+  }
+  for (const [id, name] of [[1, 'STREET'], [2, 'PRIMARY_STREET'], [17, 'PRIVATE_ROAD']]) {
+    assert.ok(!NON_ADDRESSABLE_ROAD_TYPES.has(id), `${name} (${id}) must remain addressable`);
+  }
+});

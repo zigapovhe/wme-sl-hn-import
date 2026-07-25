@@ -196,6 +196,19 @@ test('firing every registered handler throws nothing', async () => {
   });
 });
 
+test('auto-load enabled: selection handlers run without throwing', async () => {
+  // maybeAutoLoad's body was dead under test because no fixture enabled it, so its
+  // guards (coverage check, self-selection deferral) were never executed here.
+  await bootScript(
+    { 'qhnsl-layer-visible': '1', 'qhnsl-autoload': '1' },
+    ({ handlers }) => {
+      for (const handler of handlers.get('wme-selection-changed') || []) {
+        assert.doesNotThrow(() => handler({}), 'a selection handler threw with auto-load on');
+      }
+    }
+  );
+});
+
 test('every panel click handler runs without throwing', () => {
   // Fires each checkbox/button handler the panel registered. This is what catches a
   // helper that moved out of scope: the handler bodies are never otherwise executed.
