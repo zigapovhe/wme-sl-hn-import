@@ -105,8 +105,13 @@
     }
   };
 
+  // True in Tampermonkey, false when this file is require()d by the test suite,
+  // which has no DOM, no @require'd proj4 and no WME SDK. Everything gated on it
+  // is browser-only setup; the pure logic below stays reachable either way.
+  const IN_USERSCRIPT_ENV = typeof unsafeWindow !== 'undefined' || typeof window !== 'undefined';
+
   // EPSG:3794 definition (Slovenia D96/TM)
-  if (!proj4.defs['EPSG:3794']) {
+  if (IN_USERSCRIPT_ENV && typeof proj4 !== 'undefined' && !proj4.defs['EPSG:3794']) {
     proj4.defs(
       'EPSG:3794',
       '+proj=tmerc +lat_0=0 +lon_0=15 +k=0.9999 +x_0=500000 +y_0=-5000000 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs'
@@ -233,6 +238,95 @@
       }
     }
     return false;
+  }
+
+  // Reverse audit: WME house numbers with no eProstor counterpart.
+  // Pure by design — every input is a parameter, so the test suite can exercise it
+  // without a browser, an SDK or a network. Keep it that way: read no closure state.
+  //   features:        eProstor points, each { street, number, eX, eY }
+  //   selectionHNMap:  WME house numbers, street key -> { items: [...] }
+  //   loadedBbox:      EPSG:3794 area eProstor was fetched for, or null
+  function computeAuditFindings(features, selectionHNMap, loadedBbox) {
+    const findings = [];
+    if (!features || !features.length || !selectionHNMap) return findings;
+    // Without a known fetch area we cannot tell "absent from eProstor" from
+    // "outside what we asked eProstor about".
+    if (!loadedBbox) return findings;
+
+    // eProstor side: street -> number -> [projected points]
+    const official = new Map();
+    features.forEach(f => {
+      if (!f.street || !f.number) return;
+      let byNum = official.get(f.street);
+      if (!byNum) { byNum = new Map(); official.set(f.street, byNum); }
+      const num = normalizeHN(f.number);
+      let pts = byNum.get(num);
+      if (!pts) { pts = []; byNum.set(num, pts); }
+      pts.push({ eX: f.eX, eY: f.eY });
+    });
+
+    // WME side: one record per house number. The same HN is indexed under a
+    // segment's primary AND alternate names, so fold by id first — otherwise
+    // every dual-named segment becomes a false positive.
+    const wmeHns = new Map();
+    selectionHNMap.forEach((entry, streetKey) => {
+      entry.items.forEach(it => {
+        if (!it.hnId) return;
+        let rec = wmeHns.get(it.hnId);
+        if (!rec) {
+          rec = {
+            hnId: it.hnId, num: it.num, x: it.x, y: it.y,
+            lon: it.lon, lat: it.lat, segmentId: it.segmentId,
+            streetKeys: new Set()
+          };
+          wmeHns.set(it.hnId, rec);
+        }
+        rec.streetKeys.add(streetKey);
+      });
+    });
+
+    const maxSq = AUDIT_MAX_DISTANCE * AUDIT_MAX_DISTANCE;
+
+    wmeHns.forEach(rec => {
+      if (rec.lon == null || rec.lat == null) return;
+      // Compare like with like. selectionHNMap is scoped to the current viewport,
+      // which drifts as the user pans, while `official` is frozen to the fetched
+      // bbox. Auditing a house number outside that bbox would flag valid data as
+      // missing purely because we never asked eProstor about it.
+      if (rec.x == null || rec.y == null) return;
+      if (rec.x < loadedBbox.minE || rec.x > loadedBbox.maxE ||
+          rec.y < loadedBbox.minN || rec.y > loadedBbox.maxN) return;
+      let audited = false;
+      let numberExistsSomewhere = false;
+      let matched = false;
+
+      for (const key of rec.streetKeys) {
+        const byNum = official.get(key);
+        if (!byNum) continue; // street not in eProstor data: out of scope
+        audited = true;
+        const pts = byNum.get(rec.num);
+        if (!pts || !pts.length) continue; // number absent on this street
+        numberExistsSomewhere = true;
+        if (pts.some(p => {
+          const dx = p.eX - rec.x;
+          const dy = p.eY - rec.y;
+          return dx * dx + dy * dy <= maxSq;
+        })) { matched = true; break; }
+      }
+
+      if (!audited || matched) return;
+      findings.push({
+        hnId: rec.hnId,
+        number: rec.num,
+        segmentId: rec.segmentId,
+        lon: rec.lon,
+        lat: rec.lat,
+        streetKeys: Array.from(rec.streetKeys),
+        type: numberExistsSomewhere ? 'misplaced' : 'missing'
+      });
+    });
+
+    return findings;
   }
 
   // Build CQL filter for coordinate bounds (excludes apartments)
@@ -1686,92 +1780,6 @@
         return { processed, conflict };
       }
 
-      // Reverse audit: WME house numbers with no eProstor counterpart.
-      // Only streets eProstor actually returned are audited — a street outside
-      // the fetched bbox is skipped, never flagged.
-      function computeAuditFindings(selectionHNMap) {
-        const findings = [];
-        if (!lastFeatures.length || !selectionHNMap) return findings;
-        // Without a known fetch area we cannot tell "absent from eProstor" from
-        // "outside what we asked eProstor about".
-        if (!lastLoadedBbox) return findings;
-
-        // eProstor side: street -> number -> [projected points]
-        const official = new Map();
-        lastFeatures.forEach(f => {
-          if (!f.street || !f.number) return;
-          let byNum = official.get(f.street);
-          if (!byNum) { byNum = new Map(); official.set(f.street, byNum); }
-          const num = normalizeHN(f.number);
-          let pts = byNum.get(num);
-          if (!pts) { pts = []; byNum.set(num, pts); }
-          pts.push({ eX: f.eX, eY: f.eY });
-        });
-
-        // WME side: one record per house number. The same HN is indexed under a
-        // segment's primary AND alternate names, so fold by id first — otherwise
-        // every dual-named segment becomes a false positive.
-        const wmeHns = new Map();
-        selectionHNMap.forEach((entry, streetKey) => {
-          entry.items.forEach(it => {
-            if (!it.hnId) return;
-            let rec = wmeHns.get(it.hnId);
-            if (!rec) {
-              rec = {
-                hnId: it.hnId, num: it.num, x: it.x, y: it.y,
-                lon: it.lon, lat: it.lat, segmentId: it.segmentId,
-                streetKeys: new Set()
-              };
-              wmeHns.set(it.hnId, rec);
-            }
-            rec.streetKeys.add(streetKey);
-          });
-        });
-
-        const maxSq = AUDIT_MAX_DISTANCE * AUDIT_MAX_DISTANCE;
-
-        wmeHns.forEach(rec => {
-          if (rec.lon == null || rec.lat == null) return;
-          // Compare like with like. selectionHNMap is scoped to the current
-          // viewport, which drifts as the user pans, while `official` is frozen to
-          // the fetched bbox. Auditing a house number outside that bbox would flag
-          // valid data as missing purely because we never asked eProstor about it.
-          if (rec.x == null || rec.y == null) return;
-          if (rec.x < lastLoadedBbox.minE || rec.x > lastLoadedBbox.maxE ||
-              rec.y < lastLoadedBbox.minN || rec.y > lastLoadedBbox.maxN) return;
-          let audited = false;
-          let numberExistsSomewhere = false;
-          let matched = false;
-
-          for (const key of rec.streetKeys) {
-            const byNum = official.get(key);
-            if (!byNum) continue; // street not in eProstor data: out of scope
-            audited = true;
-            const pts = byNum.get(rec.num);
-            if (!pts || !pts.length) continue; // number absent on this street
-            numberExistsSomewhere = true;
-            if (pts.some(p => {
-              const dx = p.eX - rec.x;
-              const dy = p.eY - rec.y;
-              return dx * dx + dy * dy <= maxSq;
-            })) { matched = true; break; }
-          }
-
-          if (!audited || matched) return;
-          findings.push({
-            hnId: rec.hnId,
-            number: rec.num,
-            segmentId: rec.segmentId,
-            lon: rec.lon,
-            lat: rec.lat,
-            streetKeys: Array.from(rec.streetKeys),
-            type: numberExistsSomewhere ? 'misplaced' : 'missing'
-          });
-        });
-
-        return findings;
-      }
-
       async function recalculateFeatureStates() {
         if (!lastFeatures.length) return;
 
@@ -1787,7 +1795,7 @@
         });
 
         try {
-          lastAuditFindings = computeAuditFindings(selectionHNMap);
+          lastAuditFindings = computeAuditFindings(lastFeatures, selectionHNMap, lastLoadedBbox);
         } catch (e) {
           lastAuditFindings = [];
           console.warn('[SL-HN] audit failed:', e);
@@ -2216,7 +2224,7 @@
               // it to decide whether the selection is already covered.
               lastLoadedBbox = { minE, minN, maxE, maxN };
               try {
-                lastAuditFindings = computeAuditFindings(selectionHNMap);
+                lastAuditFindings = computeAuditFindings(lastFeatures, selectionHNMap, lastLoadedBbox);
               } catch (e) {
                 lastAuditFindings = [];
                 console.warn('[SL-HN] audit failed:', e);
@@ -2346,6 +2354,11 @@
     });
   }
 
+  // Everything above is definitions only. This is the single entry point, and the
+  // only reason the file cannot simply be require()d — so it is the one thing the
+  // test suite skips. In Tampermonkey IN_USERSCRIPT_ENV is always true, so startup
+  // behaves exactly as before.
+  if (IN_USERSCRIPT_ENV) {
   (unsafeWindow || window).SDK_INITIALIZED.then(() => {
     wmeSDK = getWmeSdk({ scriptId: 'quick-hn-sl-importer', scriptName: 'Quick HN Importer (SI)' });
     wmeSDK.Events.once({ eventName: 'wme-ready' }).then(() => {
@@ -2383,4 +2396,21 @@
       init();
     });
   });
+  }
+
+  // Test-only surface. `module` does not exist in Tampermonkey, so this is a no-op
+  // there and the userscript is unaffected. Only pure functions are exposed —
+  // anything touching the SDK, the DOM or the network stays private.
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = {
+      normalizeHN,
+      buildHouseNumber,
+      normalizeStreetName,
+      buildCqlFilter,
+      hasConflict,
+      computeAuditFindings,
+      AUDIT_MAX_DISTANCE,
+      MAX_HN_CONFLICT_DISTANCE
+    };
+  }
 })();
