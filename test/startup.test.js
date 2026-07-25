@@ -65,7 +65,10 @@ async function bootScript(storage = {}, whileStubbed = null) {
         handlers.get(arg.eventName).push(arg.eventHandler);
         return undefined;
       case 'Map.addLayer':
-        layers.set(arg.layerName, { visible: false, features: [] });
+        // visible starts undefined, NOT false. Seeding false made "starts hidden"
+        // assertions pass even if the script never hid anything — the test could not
+        // tell "explicitly hidden" from "never touched".
+        layers.set(arg.layerName, { visible: undefined, features: [] });
         return undefined;
       case 'Map.setLayerVisibility':
         if (layers.has(arg.layerName)) layers.get(arg.layerName).visible = arg.visibility;
@@ -122,7 +125,14 @@ async function bootScript(storage = {}, whileStubbed = null) {
     // the microtask queue drains.
     new Function('module', fs.readFileSync(SCRIPT_PATH, 'utf8'))({});
     await new Promise(resolve => setTimeout(resolve, 50));
-    if (whileStubbed) await whileStubbed({ calls, layers, handlers, domHandlers });
+    if (whileStubbed) {
+      await whileStubbed({ calls, layers, handlers, domHandlers });
+      // Firing handlers arms timers (NavPoints debounces renders by 300 ms, auto-load
+      // by 400 ms). Drain them BEFORE removing the stubs, or they fire against
+      // torn-down globals and throw a TypeError that nothing surfaces. Only needed on
+      // this path — a plain boot arms nothing.
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
   } finally {
     for (const k of Object.keys(globals)) global[k] = saved[k];
   }
@@ -142,10 +152,13 @@ test('startup creates every overlay layer', async () => {
   }
 });
 
-test('on a fresh install every overlay starts hidden', async () => {
+test('on a fresh install the registry overlays are explicitly hidden', async () => {
   const { layers } = await bootScript();
-  for (const [name, layer] of layers) {
-    assert.strictEqual(layer.visible, false, `${name} must start hidden`);
+  // Explicitly false, not merely "not true": the script must actively hide these, so
+  // nothing shows before a load. NavPoints is excluded on purpose — it never calls
+  // setLayerVisibility at creation and stays an empty layer until enabled.
+  for (const name of ['qhnsl-sdk', 'qhnsl-streetnames', 'qhnsl-audit']) {
+    assert.strictEqual(layers.get(name).visible, false, `${name} must be explicitly hidden`);
   }
 });
 

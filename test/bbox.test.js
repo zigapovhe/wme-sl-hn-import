@@ -109,3 +109,17 @@ test('pedestrian road types are excluded from house-number attachment', () => {
     assert.ok(!NON_ADDRESSABLE_ROAD_TYPES.has(id), `${name} (${id}) must remain addressable`);
   }
 });
+
+test('the production call path — project omitted — uses the global proj4', () => {
+  // computeFetchBbox defaults its third argument to the @require'd proj4 global, and
+  // the only production call site omits it. Every other test here injects a fake, so
+  // without this the tested path was never the shipped one.
+  const saved = global.proj4;
+  global.proj4 = (from, to, [lon, lat]) => [lon * 2, lat * 2];
+  try {
+    const bbox = computeFetchBbox([segment([[10, 20], [12, 22]])], 0);
+    assert.deepStrictEqual(bbox, { minE: 20, minN: 40, maxE: 24, maxN: 44 });
+  } finally {
+    global.proj4 = saved;
+  }
+});
