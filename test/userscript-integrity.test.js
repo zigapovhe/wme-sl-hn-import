@@ -32,15 +32,16 @@ test('the WME entry point is still wired up', () => {
   assert.match(source, /getWmeSdk\(/);
 });
 
-test('the entry point is gated on the userscript environment, not on Node', () => {
-  // The gate must be positive detection of a browser. A check like
-  // `typeof module === 'undefined'` would be fragile in bundled environments.
-  assert.match(source, /IN_USERSCRIPT_ENV\s*=\s*typeof unsafeWindow !== 'undefined' \|\| typeof window !== 'undefined'/);
-  assert.match(source, /if \(IN_USERSCRIPT_ENV\) \{/);
-});
-
-test('the test-only export is guarded so Tampermonkey never touches it', () => {
-  assert.match(source, /typeof module !== 'undefined' && module\.exports/);
+test('the entry point is gated on a browser check, not on absence of Node', () => {
+  // Intent, not exact text: the gate must key off unsafeWindow/window (always
+  // present in Tampermonkey) rather than something like `typeof module ===
+  // 'undefined'`, which bundlers can make false.
+  assert.match(source, /IN_USERSCRIPT_ENV/);
+  assert.match(source, /typeof unsafeWindow !== 'undefined'/);
+  assert.ok(
+    !/if \(typeof module === 'undefined'\)/.test(source),
+    'must not gate startup on the absence of a module system'
+  );
 });
 
 test('requiring the script produces no side effects beyond exports', () => {
@@ -50,6 +51,13 @@ test('requiring the script produces no side effects beyond exports', () => {
   assert.strictEqual(typeof exported.computeAuditFindings, 'function');
   assert.strictEqual(typeof globalThis.window, 'undefined', 'must not create a window global');
   assert.strictEqual(typeof globalThis.wmeSDK, 'undefined', 'must not leak wmeSDK');
+});
+
+test('module is only touched behind a typeof guard', () => {
+  // Load-bearing for Tampermonkey: `module` is undefined there, so an unguarded
+  // `module.exports =` would throw at startup and kill the whole script.
+  assert.ok(source.includes('module.exports'), 'the test surface should exist');
+  assert.match(source, /typeof module !== 'undefined'/);
 });
 
 test('only pure functions are exported', () => {

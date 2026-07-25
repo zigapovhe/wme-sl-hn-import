@@ -37,7 +37,7 @@ No manual typing is needed — just click.
 - Show only the selected street  
 - Show street names on the map (on by default)  
 - Show WME HN audit — see below (off by default)  
-- Auto-load addresses when selecting a street (off by default)  
+- Auto-load addresses when selecting a street (off by default) — fetches only when the selection falls outside the area already loaded, so hopping between nearby streets reuses the data you have  
 - Adjust the buffer distance (default: 500 m)
 
 The street names and HN audit overlays follow the main layer: both need **Show layer** on and zoom level 18 or above.
