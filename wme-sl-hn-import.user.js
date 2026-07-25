@@ -45,6 +45,10 @@
 
   // Auto-load debounce: click-dragging across several segments should cost one fetch.
   const AUTO_LOAD_DEBOUNCE_MS = 400;
+
+  // How long after a map move/zoom a click is treated as part of that gesture rather
+  // than a deliberate click on a marker.
+  const CLICK_AFTER_MOVE_GRACE_MS = 250;
   const MAX_HN_CONFLICT_DISTANCE = 10;
 
   // A WME house number counts as matched only if eProstor has that number on the
@@ -1084,6 +1088,9 @@
     // Auto-load also uses it to tell whether a selection is already covered.
     let lastLoadedBbox = null;
     let autoLoadTimer = null;
+    // When the map last panned or zoomed, so a click belonging to that gesture can be
+    // told apart from a deliberate one.
+    let lastMapMovedAt = 0;
     // The script's own setSelection calls raise wme-selection-changed. Without a
     // suppression window auto-load re-enters on them and reloads underneath the
     // user — closing the fix-street dialog mid-decision, or wiping the audit
@@ -1247,8 +1254,12 @@
       if (overlays.audit.shown !== auditWasShown) renderAuditFindings();
     }
 
-    wmeSDK.Events.on({ eventName: 'wme-map-zoom-changed', eventHandler: updateLayerVisibility });
-    wmeSDK.Events.on({ eventName: 'wme-map-move-end', eventHandler: updateLayerVisibility });
+    const onMapMoved = () => {
+      lastMapMovedAt = Date.now();
+      updateLayerVisibility();
+    };
+    wmeSDK.Events.on({ eventName: 'wme-map-zoom-changed', eventHandler: onMapMoved });
+    wmeSDK.Events.on({ eventName: 'wme-map-move-end', eventHandler: onMapMoved });
     wmeSDK.Events.on({ eventName: 'wme-selection-changed', eventHandler: onSelectionChanged });
 
     // Get current WME street name from selection
@@ -1554,6 +1565,12 @@
       if (!overlays.hn.wanted || !overlays.hn.shown || !lastFeatures.length) return;
       if (evt == null || evt.x == null || evt.y == null) return;
 
+      // A pan or zoom ends in a mouse-up that also arrives here as a click. Acting on
+      // it means adding a house number, or recentring on an audit marker, purely
+      // because the user moved the map. Nobody pans and then deliberately clicks
+      // inside this window, so ignoring it costs nothing.
+      if (Date.now() - lastMapMovedAt < CLICK_AFTER_MOVE_GRACE_MS) return;
+
       const MAX_PIXELS_SQ = MAX_CLICK_DISTANCE_PX * MAX_CLICK_DISTANCE_PX;
 
       // Nearest audit marker, if the audit is live. Resolved against the nearest
@@ -1607,10 +1624,14 @@
     wmeSDK.Events.on({ eventName: 'wme-map-mouse-click', eventHandler: handleMapClick });
 
     function onFeatureClick(feature) {
-      // A new click supersedes any open fix-street dialog
-      clearFixStreetState();
-
+      // Clear AFTER deciding we will act, not before. A click that does nothing —
+      // most often on an already-added, faded circle — used to close an open
+      // fix-street dialog anyway, which looked like the dialog dismissing itself
+      // whenever the map was nudged.
       if (feature.processed) return;
+
+      // A click that will act supersedes any open fix-street dialog.
+      clearFixStreetState();
 
       const streetName = streetNames[feature.street];
 
