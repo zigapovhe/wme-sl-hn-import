@@ -72,6 +72,18 @@ Toggle via the "Show HN NavPoints" checkbox. Visible at zoom level 18 and above.
 
 ---
 
+### 🧪 Development
+
+The pure logic (house-number normalization, the reverse audit matcher, conflict detection) is unit tested. From the repo root:
+
+```bash
+node --test
+```
+
+No dependencies and no build step — `node --test` is built into Node, and the userscript ships as the single file it always has. The script exports those functions only when `module` exists, which never happens in Tampermonkey, and its WME entry point is skipped outside a browser.
+
+Layer rendering, click handling and SDK calls are deliberately not tested — they need a real editor, so verify those in WME by hand.
+
 ### ⌨️ Keyboard Shortcuts
 
 | Shortcut | Action |
