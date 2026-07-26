@@ -415,6 +415,14 @@
         if (finding.eX == null || finding.eY == null) return;
         // A shared name means the audit already judged this pairing and called it matched
         // or misplaced. Only a genuine name mismatch is the wrong-street case.
+        // Defensive: this can't actually fire on real computeAuditFindings output while
+        // AUDIT_MAX_DISTANCE >= MAX_HN_CONFLICT_DISTANCE — a feature sharing the finding's
+        // street, within MAX_HN_CONFLICT_DISTANCE of it, would already be within the
+        // audit's own match radius and never produce a finding in the first place. Nothing
+        // else in the code enforces that relationship between the two constants, so this
+        // stays as the backstop for if the pairing radius is ever raised past the audit's.
+        // Covered directly by the "a shared street name means the audit already judged it"
+        // test, which hand-builds a finding rather than routing through the audit.
         if ((finding.streetKeys || []).includes(feature.street)) return;
 
         const dx = finding.eX - feature.eX;

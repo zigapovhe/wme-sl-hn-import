@@ -346,8 +346,10 @@ test('empty and missing inputs pair nothing', () => {
 
 test('a legitimate same-numbered address on the next street does not redden anything', () => {
   // eProstor has both A 5 and B 5, 15 m apart at a corner. WME has one house number: 5,
-  // correctly on B. A 5 is genuinely missing and must stay addable. This is the whole
-  // reason the rule requires the house number to be unexplained.
+  // correctly on B. A 5 is genuinely missing and must stay addable. No false red here
+  // because the audit matches the house number to its own street, so it never emits a
+  // finding for findWrongStreetPairs to pair with — the corner case resolves before the
+  // pairing rule even runs, not because of anything in the pairing rule itself.
   const features = [official('ulica_a', '5', 100, 100), official('ulica_b', '5', 100, 115)];
   const findings = computeAuditFindings(
     features,
