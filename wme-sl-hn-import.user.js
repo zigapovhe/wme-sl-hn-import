@@ -2652,6 +2652,28 @@
   (unsafeWindow || window).SDK_INITIALIZED.then(() => {
     wmeSDK = getWmeSdk({ scriptId: 'quick-hn-sl-importer', scriptName: 'Quick HN Importer (SI)' });
     wmeSDK.Events.once({ eventName: 'wme-ready' }).then(() => {
+      // Last checked against SDK changelog entry v2.360, on 2026-07-26. The docs build
+      // then read v2.361-8-gc4a9d05e95; the two numbers routinely differ, so the
+      // changelog is the one to resume from — read the entries above v2.360:
+      //   https://www.waze.com/editor/sdk/documents/CHANGELOG.html
+      // Per-class method lists are at /sdk/classes/index.SDK.Map.html and the same for
+      // Segments, Streets, HouseNumbers, Cities, Countries, Editing, Shortcuts and
+      // Sidebar. The Events page and MIGRATION.html need a signed-in browser.
+      //
+      // getWmeSdk is called without a `version`, so WME always hands this script the
+      // latest SDK. Nothing pins it, which is the reason these lists exist. All 31
+      // methods were present and undeprecated at v2.360, and the only deprecation in a
+      // namespace touched here is Editing.isEditingHouseNumbers, which is not called.
+      //
+      // Two entries mattered, both already handled:
+      //   v2.359  updateAddress moved its fields into the addressData envelope; see
+      //           the comment in updateSegmentStreetName
+      //   v2.360  segment flag updates rerouted through ActionManager, and
+      //           UserSession.isFirstLogin removed — neither is used here
+      //
+      // Keep the lists below in step with what the script actually calls:
+      //   grep -oE 'wmeSDK\.[A-Za-z.]+\(' wme-sl-hn-import.user.js | sort -u
+      //
       // Two lists, because the consequence differs. Anything in `required` aborts
       // startup — put a method here only if the script is genuinely unusable without
       // it. Adding a merely-nice-to-have here once made the whole script vanish when
