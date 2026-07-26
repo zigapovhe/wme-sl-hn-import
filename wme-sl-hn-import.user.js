@@ -436,6 +436,56 @@
     return checked > 0;
   }
 
+  // Auto-load's whole decision, kept pure so every guard is reachable from a test —
+  // the browser side only gathers state. Returns:
+  //   'load'  fetch this selection
+  //   'defer' ask again once the self-selection window closes
+  //   'drop'  forget this selection change
+  function decideAutoLoad({
+    enabled,
+    isLoading,
+    dialogOpen,
+    selectedIds = [],
+    selfSelectionIds = null,
+    now = 0,
+    suppressUntil = 0,
+    selectionCovered = false
+  }) {
+    if (!enabled || isLoading) return 'drop';
+
+    // The fix-street dialog renames whatever is selected NOW, and its own text asks the
+    // user to adjust that selection on the map. Such an adjustment is a genuine
+    // selection change, so no suppression window covers it — and loading would call
+    // clearFixStreetState and take the dialog away mid-decision. Drop rather than
+    // defer: a deferred run just returns while the dialog is still open.
+    if (dialogOpen) return 'drop';
+
+    if (!selectedIds.length) return 'drop';
+
+    // Our own setSelection raises wme-selection-changed like any other. The suppression
+    // window alone could not stop it, because the deferred run below outlives the
+    // window and then loads against the very selection the script made, wiping the
+    // audit finding or the dialog the user had just opened. Identity, not timing, is
+    // what makes a selection ours.
+    if (isSameSelection(selectedIds, selfSelectionIds)) return 'drop';
+
+    // A genuine selection arriving inside the window is honoured once it closes.
+    // Dropping it outright meant that, since every house-number add marks a self
+    // selection, click-add-move-on work suppressed auto-load indefinitely.
+    if (now < suppressUntil) return 'defer';
+
+    if (selectionCovered) return 'drop';
+    return 'load';
+  }
+
+  // Set comparison: the SDK hands back ids in no guaranteed order, and mixes numeric
+  // and string ids depending on the call.
+  function isSameSelection(a, b) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    const seen = new Set(b.map(String));
+    return a.every(id => seen.has(String(id)));
+  }
+
   // Grid size for the location component of a feature key. Anything coarser than a
   // town and finer than the distance between towns works.
   const FEAT_KEY_GRID_M = 1000;
@@ -1108,17 +1158,28 @@
     // data, so the audit must stay silent rather than claim a number is missing.
     // Auto-load also uses it to tell whether a selection is already covered.
     let lastLoadedBbox = null;
+    // The last box we asked eProstor for, set whether or not the answer was usable.
+    // Auto-load's dedup key; see autoLoadState for why it is not lastLoadedBbox.
+    let lastAttemptedBbox = null;
     let autoLoadTimer = null;
     // When the map last panned or zoomed, so a click belonging to that gesture can be
     // told apart from a deliberate one.
     let lastMapMovedAt = 0;
-    // The script's own setSelection calls raise wme-selection-changed. Without a
-    // suppression window auto-load re-enters on them and reloads underneath the
-    // user — closing the fix-street dialog mid-decision, or wiping the audit
-    // findings on the very click meant to inspect one.
+    // The script's own setSelection calls raise wme-selection-changed. Auto-load must
+    // not re-enter on them and reload underneath the user — closing the fix-street
+    // dialog mid-decision, or wiping the audit findings on the very click meant to
+    // inspect one.
+    //
+    // Two pieces of state, because the window alone was not enough: it expires, and the
+    // deferred re-check outlives it, so our own selection came back around ~2s later
+    // and loaded anyway. The ids identify which selection is ours regardless of timing;
+    // the window still exists so a genuine selection arriving mid-settle is deferred
+    // rather than lost.
     let suppressAutoLoadUntil = 0;
-    function markSelfSelection() {
+    let selfSelectionIds = null;
+    function markSelfSelection(ids) {
       suppressAutoLoadUntil = Date.now() + 2000;
+      selfSelectionIds = Array.isArray(ids) ? ids.map(String) : null;
     }
     let streetNames = {};
     let streets = {};
@@ -1566,7 +1627,7 @@
         console.debug('[SL-HN] setMapCenter failed:', e);
       }
       try {
-        markSelfSelection();
+        markSelfSelection([finding.segmentId]);
         wmeSDK.Editing.setSelection({
           selection: { ids: [finding.segmentId], objectType: 'segment' }
         });
@@ -1691,7 +1752,7 @@
 
     // Attach a house number to a segment (shared by direct add, "add anyway" and post-rename auto-add)
     function addHouseNumberToSegment(feature, segment) {
-      markSelfSelection();
+      markSelfSelection([segment.id]);
       wmeSDK.Editing.setSelection({ selection: { ids: [segment.id], objectType: 'segment' } });
 
       const key = featKey(feature.street, feature.number, feature.eX, feature.eY);
@@ -1751,7 +1812,7 @@
 
       const segmentIds = [...candidateIds];
       if (segmentIds.length > 0) {
-        markSelfSelection();
+        markSelfSelection(segmentIds);
         wmeSDK.Editing.setSelection({ selection: { ids: segmentIds, objectType: 'segment' } });
       }
 
@@ -1964,7 +2025,10 @@
           lastFeatures = [];
           // Reset coverage too: until this load succeeds we hold no authoritative data,
           // and a stale box would let auto-load treat the area as already fetched.
+          // The attempt key goes with it — updateLayer re-sets it the moment it has a
+          // box, so this only matters on the paths that never get that far.
           lastLoadedBbox = null;
+          lastAttemptedBbox = null;
           streetAnalysisDiv.style.display = 'none';
           if (auditSummaryDiv) auditSummaryDiv.style.display = 'none';
 
@@ -1993,7 +2057,23 @@
       // Wrapped, not passed directly: the click event would arrive as the options argument.
       btnLoad.addEventListener('click', () => loadSelectedStreet());
 
-      const selectionCoveredByLoadedBbox = (selected) => isSelectionInsideBbox(selected, lastLoadedBbox);
+      // Dedup on the area eProstor was last asked about, not the area it successfully
+      // answered for. lastLoadedBbox is null after a failed or truncated fetch — right
+      // for the audit, which must never judge against data it does not hold, but as an
+      // auto-load key it means "nothing is covered", so every further selection change
+      // refires the same failing request, up to 30 paginated calls a time, at a service
+      // that has just failed. A manual Load ignores this key, so a retry stays one
+      // click away.
+      const autoLoadState = (selected) => ({
+        enabled: LS.getAutoLoad(),
+        isLoading,
+        dialogOpen: fixStreetDialogEl !== null,
+        selectedIds: selected.map(seg => seg.id),
+        selfSelectionIds,
+        now: Date.now(),
+        suppressUntil: suppressAutoLoadUntil,
+        selectionCovered: isSelectionInsideBbox(selected, lastAttemptedBbox)
+      });
 
       // Auto-load fires on selection change, never on pan: updateLayer derives its
       // bbox from the selected segment, and auto-fetching per pan would hammer the
@@ -2001,44 +2081,36 @@
       // Defined here (not next to onSelectionChanged) because loadSelectedStreet
       // lives in this closure.
       function maybeAutoLoad() {
-        if (!LS.getAutoLoad() || isLoading) return;
+        const state = autoLoadState(getSelectedSegments());
 
-        const selected = getSelectedSegments();
-        if (selected.length === 0) return;
-
-        // Dedup on coverage, not street name. eProstor is fetched per bbox, so
-        // "already loaded" is a question about area: a name key silently skipped
-        // same-named streets elsewhere, never fired for alternate-name-only
-        // segments, and went permanently stale when a load failed.
-        if (selectionCoveredByLoadedBbox(selected)) return;
+        // Consume the marker. Our setSelection raises exactly one selection-changed
+        // event, so once that event has been seen the ids must stop counting as ours —
+        // otherwise the user deliberately re-selecting one of those segments later, say
+        // the one an audit marker just centred on, would be dropped as ours forever.
+        // Read after the state snapshot, so this event is still judged with it.
+        if (isSameSelection(state.selectedIds, selfSelectionIds)) selfSelectionIds = null;
 
         // Debounce: click-dragging across segments must fire one fetch, not many.
-        // The suppression window is deliberately NOT checked here — a real selection
-        // arriving while one of our own setSelection calls is still settling used to be
-        // dropped outright, and since every house-number add calls markSelfSelection,
-        // click-add-move-on work suppressed auto-load indefinitely. Arm the timer and
-        // let the deferred check decide.
+        // Deliberately arms on 'defer' as well as 'load' — the deferred run re-checks.
+        if (decideAutoLoad(state) === 'drop') return;
+
         if (autoLoadTimer) clearTimeout(autoLoadTimer);
         autoLoadTimer = setTimeout(runAutoLoad, AUTO_LOAD_DEBOUNCE_MS);
       }
 
       function runAutoLoad() {
         autoLoadTimer = null;
-        // Re-validate: during the debounce the user may have deselected, turned
-        // auto-load off, or another load may have started.
-        if (!LS.getAutoLoad() || isLoading) return;
+        // Re-decide from scratch: during the debounce the user may have deselected,
+        // turned auto-load off, or opened the fix-street dialog.
+        const state = autoLoadState(getSelectedSegments());
+        const verdict = decideAutoLoad(state);
 
-        // Still inside a self-selection window: re-arm rather than drop, so a genuine
-        // selection made during it is honoured once the window closes.
-        const waitLeft = suppressAutoLoadUntil - Date.now();
-        if (waitLeft > 0) {
-          autoLoadTimer = setTimeout(runAutoLoad, waitLeft + 50);
+        if (verdict === 'defer') {
+          autoLoadTimer = setTimeout(runAutoLoad, (state.suppressUntil - state.now) + 50);
           return;
         }
+        if (verdict !== 'load') return;
 
-        const stillSelected = getSelectedSegments();
-        if (stillSelected.length === 0) return;
-        if (selectionCoveredByLoadedBbox(stillSelected)) return;
         loadSelectedStreet({ auto: true }).catch(err => console.warn('[SL-HN] auto-load failed:', err));
       }
 
@@ -2056,6 +2128,9 @@
         // the Clear the user just asked for.
         if (autoLoadTimer) { clearTimeout(autoLoadTimer); autoLoadTimer = null; }
         lastLoadedBbox = null; // no reference data any more, so the audit must stay silent
+        // Clear is also how the user retries a failed area: dropping the attempt key
+        // lets auto-load fetch it again, instead of treating it as already tried.
+        lastAttemptedBbox = null;
         overlays.hn.wanted = false;
         updateLayerVisibility(); // keeps overlays.hn.shown in sync (a direct setLayerVisibility here left it stale)
         setChecked(chkVis, false);
@@ -2369,6 +2444,10 @@
             return;
           }
           const { minE, minN, maxE, maxN } = bbox;
+          // Recorded before the request, not after: the point of this key is to stop
+          // auto-load re-asking for a box whose fetch failed, and a failed fetch never
+          // reaches the code below.
+          lastAttemptedBbox = { minE, minN, maxE, maxN };
 
           Promise.all([
             fetchAddresses(minE, minN, maxE, maxN, () => loadId !== currentLoadId),
@@ -2653,6 +2732,7 @@
       computeAuditFindings,
       computeFetchBbox,
       isSelectionInsideBbox,
+      decideAutoLoad,
       makeFeatKey,
       NON_ADDRESSABLE_ROAD_TYPES,
       AUDIT_MAX_DISTANCE,

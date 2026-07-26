@@ -5,8 +5,10 @@
 // undefined identifiers and broken wiring, the class of mistake `node --check`
 // cannot see.
 //
-// What it covers: layer creation, overlay visibility gating, and every registered
-// event handler (updateLayerVisibility, onSelectionChanged, maybeAutoLoad).
+// What it covers: layer creation, overlay visibility gating, every registered event
+// handler (updateLayerVisibility, onSelectionChanged, maybeAutoLoad), and auto-load's
+// fetch dedup end to end — the decision itself is unit-tested in autoload.test.js, but
+// only a boot can show that the runtime feeds it the right state.
 //
 // What it does NOT cover, verified by mutation testing:
 //   - the render paths (applyFeatureFilter / renderAuditFindings). Nothing here loads
@@ -14,6 +16,8 @@
 //     error-isolation try/catch, so it degrades silently rather than throwing.
 //   - redundant-work regressions, e.g. dropping the `shown` change-guard. That makes
 //     extra SDK calls without throwing.
+//   - auto-load's fix-street and self-selection guards. Both need the dialog open,
+//     which needs loaded address data and a map click on a circle.
 // Those still need a pass in the real editor.
 //
 // If you hit a failure here after adding a browser or SDK call these stubs don't
@@ -31,9 +35,12 @@ const SCRIPT_PATH = path.join(__dirname, '..', 'wme-sl-hn-import.user.js');
 // whileStubbed: optional callback run after boot but *before* the stubs are removed.
 // Anything that calls back into the script (firing an event handler, for instance)
 // must go here — the script reads globals like localStorage at call time.
-async function bootScript(storage = {}, whileStubbed = null) {
+// options.selection: what Editing.getSelection returns (default null, i.e. nothing
+// selected). options.segments: id -> segment object handed back by Segments.getById.
+async function bootScript(storage = {}, whileStubbed = null, options = {}) {
   const calls = [];
   const layers = new Map();
+  const requests = []; // every GM_xmlhttpRequest the script issued
 
   // Click handlers registered on panel elements, so tests can fire them. Without
   // this, every checkbox and button handler is dead code as far as the suite is
@@ -82,7 +89,9 @@ async function bootScript(storage = {}, whileStubbed = null) {
       case 'Map.getZoomLevel': return 19;
       case 'Map.getMapExtent': return [14, 46, 15, 47];
       case 'Map.getMapPixelFromLonLat': return { x: 0, y: 0 };
-      case 'Editing.getSelection': return null;
+      case 'Editing.getSelection': return options.selection || null;
+      case 'DataModel.Segments.getById':
+        return (options.segments || {})[arg && arg.segmentId] || undefined;
       case 'Events.once': return Promise.resolve();
       case 'Sidebar.registerScriptTab':
         return Promise.resolve({ tabLabel: element(), tabPane: element() });
@@ -112,7 +121,13 @@ async function bootScript(storage = {}, whileStubbed = null) {
     // Needed by the toast renderer. Without it every toast fails inside its own
     // try/catch, so that path would look exercised while never actually running.
     requestAnimationFrame: (fn) => setTimeout(fn, 0),
-    GM_xmlhttpRequest() {}, GM_setClipboard() {},
+    // Fails every request, on purpose: the interesting question for auto-load is what
+    // it does *after* a fetch it could not use.
+    GM_xmlhttpRequest(req) {
+      requests.push(req);
+      setTimeout(() => req.onerror && req.onerror(new Error('stubbed network failure')), 0);
+    },
+    GM_setClipboard() {},
     localStorage: {
       getItem: (k) => (k in storage ? storage[k] : null),
       setItem() {}
@@ -129,7 +144,7 @@ async function bootScript(storage = {}, whileStubbed = null) {
     new Function('module', fs.readFileSync(SCRIPT_PATH, 'utf8'))({});
     await new Promise(resolve => setTimeout(resolve, 50));
     if (whileStubbed) {
-      await whileStubbed({ calls, layers, handlers, domHandlers });
+      await whileStubbed({ calls, layers, handlers, domHandlers, requests });
       // Firing handlers arms timers (NavPoints debounces renders by 300 ms, auto-load
       // by 400 ms). Drain them BEFORE removing the stubs, or they fire against
       // torn-down globals and throw a TypeError that nothing surfaces. Only needed on
@@ -139,7 +154,7 @@ async function bootScript(storage = {}, whileStubbed = null) {
   } finally {
     for (const k of Object.keys(globals)) global[k] = saved[k];
   }
-  return { calls, layers, handlers, domHandlers };
+  return { calls, layers, handlers, domHandlers, requests };
 }
 
 test('the script boots without throwing', async () => {
@@ -222,6 +237,37 @@ test('auto-load enabled: selection handlers run without throwing', async () => {
         assert.doesNotThrow(() => handler({}), 'a selection handler threw with auto-load on');
       }
     }
+  );
+});
+
+test('a failed auto-load is not retried on the next selection change', () => {
+  // decideAutoLoad's dedup is unit-tested; what this covers is the wiring, which the
+  // pure test cannot see: that the runtime keys on the box we *asked* for rather than
+  // the box eProstor answered for. Keyed on the latter, a failed fetch left "nothing
+  // loaded" behind and every further selection change refired the whole paginated
+  // request chain at a service that had just failed.
+  const segment = {
+    id: 's1',
+    geometry: { coordinates: [[14.5, 46.05], [14.501, 46.051]] },
+    primaryStreetId: null,
+    alternateStreetIds: []
+  };
+  return bootScript(
+    { 'qhnsl-layer-visible': '1', 'qhnsl-autoload': '1' },
+    async ({ handlers, requests }) => {
+      const fire = async () => {
+        for (const h of handlers.get('wme-selection-changed') || []) h({});
+        await new Promise(r => setTimeout(r, 600)); // past the 400 ms auto-load debounce
+      };
+
+      await fire();
+      assert.strictEqual(requests.length, 1, 'the first selection should fetch once');
+
+      await fire();
+      assert.strictEqual(requests.length, 1,
+        'the same area must not be re-fetched after its fetch failed');
+    },
+    { selection: { objectType: 'segment', ids: ['s1'] }, segments: { s1: segment } }
   );
 });
 
