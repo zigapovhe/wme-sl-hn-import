@@ -5,7 +5,9 @@ const assert = require('node:assert');
 
 const {
   computeAuditFindings,
-  AUDIT_MAX_DISTANCE
+  findWrongStreetPairs,
+  AUDIT_MAX_DISTANCE,
+  MAX_HN_CONFLICT_DISTANCE
 } = require('../wme-sl-hn-import.user.js');
 
 // Coordinates are EPSG:3794 metres, so distances in these fixtures are literal.
@@ -28,6 +30,15 @@ function wmeIndex(streets) {
 
 function wmeHn({ hnId, num, x, y, segmentId = 500 }) {
   return { hnId, num, x, y, segmentId, lon: 14 + x / 100000, lat: 46 + y / 100000 };
+}
+
+// One audit finding as computeAuditFindings emits it.
+function auditFinding({ number, streetKeys, eX, eY, type = 'missing', hnId = '1', segmentId = 500 }) {
+  return {
+    hnId, number, segmentId, streetKeys, type,
+    lon: 14 + eX / 100000, lat: 46 + eY / 100000,
+    eX, eY
+  };
 }
 
 test('a house number matching eProstor in number and position is not flagged', () => {
@@ -239,4 +250,140 @@ test('a finding carries the projected coordinates the wrong-street pairing needs
   assert.strictEqual(findings.length, 1);
   assert.strictEqual(findings[0].eX, 250);
   assert.strictEqual(findings[0].eY, 400);
+});
+
+test('an unmatched address pairs with a same-numbered house number on another street', () => {
+  const feature = official('ulica_a', '5', 100, 100);
+  const finding = auditFinding({ number: '5', streetKeys: ['ulica_b'], eX: 104, eY: 100 });
+  const pairs = findWrongStreetPairs([feature], [finding]);
+  assert.strictEqual(pairs.length, 1);
+  assert.strictEqual(pairs[0].feature, feature, 'pairs reference the inputs, not copies');
+  assert.strictEqual(pairs[0].finding, finding);
+  assert.strictEqual(pairs[0].distance, 4);
+});
+
+test('a house number beyond the conflict radius is not the same address', () => {
+  const pairs = findWrongStreetPairs(
+    [official('ulica_a', '5', 100, 100)],
+    [auditFinding({
+      number: '5', streetKeys: ['ulica_b'],
+      eX: 100, eY: 100 + MAX_HN_CONFLICT_DISTANCE + 0.5
+    })]
+  );
+  assert.deepStrictEqual(pairs, []);
+});
+
+test('exactly at the conflict radius still pairs', () => {
+  const pairs = findWrongStreetPairs(
+    [official('ulica_a', '5', 100, 100)],
+    [auditFinding({
+      number: '5', streetKeys: ['ulica_b'],
+      eX: 100, eY: 100 + MAX_HN_CONFLICT_DISTANCE
+    })]
+  );
+  assert.strictEqual(pairs.length, 1, 'inclusive, like the audit threshold');
+});
+
+test('an address already in WME is not waiting for anything', () => {
+  const pairs = findWrongStreetPairs(
+    [{ ...official('ulica_a', '5', 100, 100), processed: true }],
+    [auditFinding({ number: '5', streetKeys: ['ulica_b'], eX: 104, eY: 100 })]
+  );
+  assert.deepStrictEqual(pairs, []);
+});
+
+test('a misplaced finding is a different diagnosis and does not pair', () => {
+  const pairs = findWrongStreetPairs(
+    [official('ulica_a', '5', 100, 100)],
+    [auditFinding({ number: '5', streetKeys: ['ulica_b'], eX: 104, eY: 100, type: 'misplaced' })]
+  );
+  assert.deepStrictEqual(pairs, []);
+});
+
+test('a shared street name means the audit already judged it', () => {
+  const pairs = findWrongStreetPairs(
+    [official('ulica_a', '5', 100, 100)],
+    [auditFinding({ number: '5', streetKeys: ['ulica_a', 'ulica_b'], eX: 104, eY: 100 })]
+  );
+  assert.deepStrictEqual(pairs, []);
+});
+
+test('a different number nearby is somebody else problem', () => {
+  const pairs = findWrongStreetPairs(
+    [official('ulica_a', '5', 100, 100)],
+    [auditFinding({ number: '6', streetKeys: ['ulica_b'], eX: 104, eY: 100 })]
+  );
+  assert.deepStrictEqual(pairs, []);
+});
+
+test('one house number reddens only the nearest of two candidate addresses', () => {
+  // Input order deliberately puts the farther one first, so passing proves the sort ran.
+  const near = official('ulica_a', '5', 100, 100);
+  const far = official('ulica_c', '5', 106, 100);
+  const finding = auditFinding({ number: '5', streetKeys: ['ulica_b'], eX: 102, eY: 100 });
+  const pairs = findWrongStreetPairs([far, near], [finding]);
+  assert.strictEqual(pairs.length, 1);
+  assert.strictEqual(pairs[0].feature, near);
+});
+
+test('one address pairs with only one house number', () => {
+  const feature = official('ulica_a', '5', 100, 100);
+  const closer = auditFinding({ number: '5', streetKeys: ['ulica_b'], eX: 102, eY: 100, hnId: 'A' });
+  const farther = auditFinding({ number: '5', streetKeys: ['ulica_c'], eX: 104, eY: 100, hnId: 'B' });
+  const pairs = findWrongStreetPairs([feature], [farther, closer]);
+  assert.strictEqual(pairs.length, 1);
+  assert.strictEqual(pairs[0].finding, closer);
+});
+
+test('empty and missing inputs pair nothing', () => {
+  const feature = official('ulica_a', '5', 100, 100);
+  const finding = auditFinding({ number: '5', streetKeys: ['ulica_b'], eX: 104, eY: 100 });
+  assert.deepStrictEqual(findWrongStreetPairs([], []), []);
+  assert.deepStrictEqual(findWrongStreetPairs(null, [finding]), []);
+  assert.deepStrictEqual(findWrongStreetPairs([feature], null), []);
+  assert.deepStrictEqual(findWrongStreetPairs([feature], []), []);
+});
+
+test('a legitimate same-numbered address on the next street does not redden anything', () => {
+  // eProstor has both A 5 and B 5, 15 m apart at a corner. WME has one house number: 5,
+  // correctly on B. A 5 is genuinely missing and must stay addable. This is the whole
+  // reason the rule requires the house number to be unexplained.
+  const features = [official('ulica_a', '5', 100, 100), official('ulica_b', '5', 100, 115)];
+  const findings = computeAuditFindings(
+    features,
+    wmeIndex({ ulica_b: [wmeHn({ hnId: '1', num: '5', x: 100, y: 115 })] }),
+    BBOX
+  );
+  assert.deepStrictEqual(findings, [], 'the house number matches its own street');
+  assert.deepStrictEqual(findWrongStreetPairs(features, findings), []);
+});
+
+test('end to end: a house number on the wrong street becomes a pair', () => {
+  // eProstor must carry *something* on the wrong street, or the audit never judges it.
+  const features = [official('ulica_a', '5', 100, 100), official('ulica_b', '7', 100, 200)];
+  const findings = computeAuditFindings(
+    features,
+    wmeIndex({ ulica_b: [wmeHn({ hnId: '9', num: '5', x: 100, y: 104, segmentId: 777 })] }),
+    BBOX
+  );
+  assert.strictEqual(findings.length, 1);
+  assert.strictEqual(findings[0].type, 'missing');
+
+  const pairs = findWrongStreetPairs(features, findings);
+  assert.strictEqual(pairs.length, 1);
+  assert.strictEqual(pairs[0].feature, features[0]);
+  assert.strictEqual(pairs[0].finding.segmentId, 777);
+});
+
+test('a wrong street absent from the loaded data cannot be detected', () => {
+  // A stated limitation, kept honest: the audit only judges streets eProstor answered
+  // for, so there is no finding to pair and the circle stays plainly addable.
+  const features = [official('ulica_a', '5', 100, 100)];
+  const findings = computeAuditFindings(
+    features,
+    wmeIndex({ ulica_b: [wmeHn({ hnId: '1', num: '5', x: 100, y: 104 })] }),
+    BBOX
+  );
+  assert.deepStrictEqual(findings, []);
+  assert.deepStrictEqual(findWrongStreetPairs(features, findings), []);
 });

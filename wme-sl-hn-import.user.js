@@ -388,6 +388,59 @@
     return findings;
   }
 
+  // The wrong-street case: an eProstor address nobody has added, sitting on top of a WME
+  // house number with the same number under a *different* street name. Both sides must be
+  // unaccounted for — an eProstor point already in WME is not waiting for anything, and a
+  // house number the audit could explain belongs to the street it is on. Without that
+  // second half, two legitimate same-numbered addresses at a corner would flag each other.
+  // Pure by design, like computeAuditFindings: read no closure state.
+  //   features: eProstor points, each { number, street, eX, eY, processed }
+  //   findings: computeAuditFindings output
+  function findWrongStreetPairs(features, findings) {
+    const pairs = [];
+    if (!features || !features.length || !findings || !findings.length) return pairs;
+
+    const maxSq = MAX_HN_CONFLICT_DISTANCE * MAX_HN_CONFLICT_DISTANCE;
+    const candidates = [];
+
+    features.forEach(feature => {
+      if (!feature || feature.processed) return;
+      if (!feature.number || feature.eX == null || feature.eY == null) return;
+
+      findings.forEach(finding => {
+        // 'misplaced' means the number *was* found on that street, just far away. That is
+        // a different diagnosis and keeps its own purple marker.
+        if (finding.type !== 'missing') return;
+        if (finding.number !== feature.number) return;
+        if (finding.eX == null || finding.eY == null) return;
+        // A shared name means the audit already judged this pairing and called it matched
+        // or misplaced. Only a genuine name mismatch is the wrong-street case.
+        if ((finding.streetKeys || []).includes(feature.street)) return;
+
+        const dx = finding.eX - feature.eX;
+        const dy = finding.eY - feature.eY;
+        const distSq = dx * dx + dy * dy;
+        if (distSq > maxSq) return;
+        candidates.push({ feature, finding, distSq });
+      });
+    });
+
+    // Nearest first, one-to-one. Without this, one house number could redden two circles
+    // on a street that carries the same number twice a few metres apart. sort is stable,
+    // so equidistant candidates keep input order.
+    candidates.sort((a, b) => a.distSq - b.distSq);
+    const usedFeatures = new Set();
+    const usedFindings = new Set();
+    candidates.forEach(c => {
+      if (usedFeatures.has(c.feature) || usedFindings.has(c.finding)) return;
+      usedFeatures.add(c.feature);
+      usedFindings.add(c.finding);
+      pairs.push({ feature: c.feature, finding: c.finding, distance: Math.sqrt(c.distSq) });
+    });
+
+    return pairs;
+  }
+
   // The EPSG:3794 box to ask eProstor about: the selected segments' extent, grown by
   // `buffer` metres. Returns null when no segment has usable geometry.
   // proj4 is passed in so this stays testable without the @require'd global.
@@ -2769,6 +2822,7 @@
       buildCqlFilter,
       hasConflict,
       computeAuditFindings,
+      findWrongStreetPairs,
       computeFetchBbox,
       isSelectionInsideBbox,
       decideAutoLoad,
