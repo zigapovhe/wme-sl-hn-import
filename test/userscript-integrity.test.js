@@ -64,7 +64,7 @@ test('only pure functions are exported', () => {
   const exported = require(SCRIPT_PATH);
   const allowed = new Set([
     'normalizeHN', 'buildHouseNumber', 'normalizeStreetName', 'buildCqlFilter',
-    'hasConflict', 'computeAuditFindings', 'findWrongStreetPairs',
+    'hasConflict', 'computeAuditFindings', 'findWrongStreetPairs', 'applyWrongStreetPairs',
     'computeFetchBbox', 'isSelectionInsideBbox',
     'decideAutoLoad', 'makeFeatKey',
     'NON_ADDRESSABLE_ROAD_TYPES',

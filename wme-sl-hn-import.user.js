@@ -449,6 +449,30 @@
     return pairs;
   }
 
+  // Applies the wrong-street verdict. The circle becomes a conflict so it reads as "do not
+  // just add this", and the finding is dropped so no purple marker claims the number is
+  // absent from eProstor when it plainly is not.
+  // Clearing every feature first is not optional: a marking left from the previous run
+  // would survive the user fixing the street and keep refusing the add, the same trap the
+  // wme-after-edit handler recomputes to avoid.
+  function applyWrongStreetPairs(features, findings) {
+    (features || []).forEach(f => { if (f) f.wrongStreet = null; });
+
+    const pairs = findWrongStreetPairs(features, findings);
+    if (!pairs.length) return findings || [];
+
+    const paired = new Set();
+    pairs.forEach(({ feature, finding }) => {
+      feature.conflict = true;
+      // Only segmentId: it is all the click needs to name the WME street, and the finding
+      // it came from is gone by the time anything reads this.
+      feature.wrongStreet = { segmentId: finding.segmentId };
+      paired.add(finding);
+    });
+
+    return findings.filter(f => !paired.has(f));
+  }
+
   // The EPSG:3794 box to ask eProstor about: the selected segments' extent, grown by
   // `buffer` metres. Returns null when no segment has usable geometry.
   // proj4 is passed in so this stays testable without the @require'd global.
@@ -2831,6 +2855,7 @@
       hasConflict,
       computeAuditFindings,
       findWrongStreetPairs,
+      applyWrongStreetPairs,
       computeFetchBbox,
       isSelectionInsideBbox,
       decideAutoLoad,

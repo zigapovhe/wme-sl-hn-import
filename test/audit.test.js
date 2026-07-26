@@ -6,6 +6,7 @@ const assert = require('node:assert');
 const {
   computeAuditFindings,
   findWrongStreetPairs,
+  applyWrongStreetPairs,
   AUDIT_MAX_DISTANCE,
   MAX_HN_CONFLICT_DISTANCE
 } = require('../wme-sl-hn-import.user.js');
@@ -388,4 +389,38 @@ test('a wrong street absent from the loaded data cannot be detected', () => {
   );
   assert.deepStrictEqual(findings, []);
   assert.deepStrictEqual(findWrongStreetPairs(features, findings), []);
+});
+
+test('applying a pair reddens the circle and drops the purple marker', () => {
+  const feature = official('ulica_a', '5', 100, 100);
+  const finding = auditFinding({
+    number: '5', streetKeys: ['ulica_b'], eX: 104, eY: 100, segmentId: 777
+  });
+  const remaining = applyWrongStreetPairs([feature], [finding]);
+  assert.strictEqual(feature.conflict, true);
+  assert.deepStrictEqual(feature.wrongStreet, { segmentId: 777 });
+  assert.deepStrictEqual(remaining, [], 'a wrong-street number is not missing from eProstor');
+});
+
+test('an unpaired finding keeps its marker and leaves the circle alone', () => {
+  const feature = official('ulica_a', '5', 100, 100);
+  const far = auditFinding({ number: '9', streetKeys: ['ulica_b'], eX: 500, eY: 500 });
+  const remaining = applyWrongStreetPairs([feature], [far]);
+  assert.deepStrictEqual(remaining, [far]);
+  assert.strictEqual(feature.wrongStreet, null);
+  assert.notStrictEqual(feature.conflict, true);
+});
+
+test('a marking from a previous run is cleared before re-applying', () => {
+  // The trap this guards: the user fixes the street, the pair disappears, and a stale
+  // marking would leave the circle refusing the add forever.
+  const feature = { ...official('ulica_a', '5', 100, 100), wrongStreet: { segmentId: 777 } };
+  const remaining = applyWrongStreetPairs([feature], []);
+  assert.strictEqual(feature.wrongStreet, null);
+  assert.deepStrictEqual(remaining, []);
+});
+
+test('applying nothing returns the findings untouched', () => {
+  assert.deepStrictEqual(applyWrongStreetPairs(null, null), []);
+  assert.deepStrictEqual(applyWrongStreetPairs([], []), []);
 });
