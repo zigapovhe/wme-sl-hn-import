@@ -35,7 +35,37 @@ No manual typing is needed — just click.
 - Toggle the layer visibility  
 - Show only missing house numbers  
 - Show only the selected street  
+- Show street names on the map (on by default)  
+- Show WME HN audit — see below (off by default)  
+- Auto-load addresses when selecting a street (off by default) — fetches only when the selection falls outside the area already requested, so hopping between nearby streets reuses the data you have  
 - Adjust the buffer distance (default: 500 m)
+
+The street names and HN audit overlays follow the main layer: both need **Show layer** on and zoom level 18 or above.
+
+Auto-load skips any area it has already requested, including one whose fetch failed, so a broken area is not re-fetched on every later click — press **Load** or **Clear** to try it again. It also stands down while the fix-street dialog is open, since that dialog acts on whatever is selected at the time.
+
+## 🔍 Reverse HN Audit
+
+The normal overlay checks eProstor against WME. This checks the other direction: house numbers that exist **in WME** but do not line up with eProstor — typos, demolished addresses, bad old imports.
+
+Purple markers, in two kinds:
+
+| Marker | Meaning |
+| --- | --- |
+| 🟣 Solid | The number is **not on that street** in eProstor at all |
+| ⚪ Hollow | The number **does exist**, but the WME pin sits more than 30 m from eProstor's point for it |
+
+Hollow markers are the weaker signal — a house number can legitimately sit a building's width from the official point, so treat them as "worth a look", not as proof of an error.
+
+**Clicking a marker centers the map and selects the owning segment** (changing your current selection), then tells you why it was flagged. It never edits or deletes anything — fix it yourself with WME's house-number editor.
+
+Only streets present in the loaded eProstor data are audited, and only inside the area that was fetched. Anything outside stays unflagged rather than being wrongly reported as missing, so pan and press Load again to audit a new area.
+
+### Known limitation
+
+Whether a house number shows as already-present is worked out from the Waze data **currently in view**, while the loaded address points cover the wider buffered area. Circles well outside the viewport can therefore look un-added even when they already exist in WME, and clicking one would add a duplicate.
+
+Press Load again after panning to refresh that state. Fixing it properly means fetching Waze house numbers for the whole buffered area rather than the visible map, which gets expensive at larger buffer settings — so it is a deliberate trade-off rather than an oversight.
 
 ## 📍 HN NavPoints Overlay
 
@@ -49,6 +79,18 @@ Optional passive overlay showing every loaded Waze house number as a dashed line
 Toggle via the "Show HN NavPoints" checkbox. Visible at zoom level 18 and above.
 
 ---
+
+### 🧪 Development
+
+The pure logic (house-number normalization, the reverse audit matcher, conflict detection, the fetch-bbox maths and the auto-load decision) is unit tested, and a startup harness boots the whole script against stubbed browser and SDK globals to fire every registered event and panel handler. From the repo root:
+
+```bash
+node --test
+```
+
+No dependencies and no build step — `node --test` is built into Node, and the userscript ships as the single file it always has. The script exports those functions only when `module` exists, which never happens in Tampermonkey, and its WME entry point is skipped outside a browser.
+
+Layer rendering and click handling are still not covered — the harness never loads address data, so those paths never run. Verify them in WME by hand.
 
 ### ⌨️ Keyboard Shortcuts
 
@@ -120,6 +162,14 @@ Click a house number whose official street name is missing from WME (or exists o
 - Renaming now also works for segments saved without any address — the city is borrowed from the rest of the selection (or from WME's best guess for the area)
 - The far-street dialog says "about 448 m" instead of "~448 m", which was easy to misread as a negative distance
 
+### v2.4.0
+
+- Official street names drawn over each street's house numbers, with their own toggle (see Options)
+- Reverse HN audit: WME house numbers that don't line up with eProstor (see above)
+- Optional auto-load when a street is selected, off by default
+- Map gestures no longer dismiss the fix-street dialog
+- First test suite — `node --test`, no dependencies and no build step
+
 ---
 
 ## ⚠️ Notes & Gotchas
@@ -130,10 +180,9 @@ If house numbers appear 🟠 orange instead of 🟢 green, the WME street name m
 **New in v2.1.0**: The script now warns you about mismatches and suggests corrections! Look for the yellow warning box and use the → button to fix street names with one click.
 
 ### 🔴 Red conflicts
-Red numbers appear when:
-- Another house number exists nearby but differs  
-- Wrong casing (`4A` vs `4a`)  
-- Misplaced numbers on the wrong segment  
+Red numbers appear when a **different** house number already exists within 10 m — typically a misplaced number sitting on the wrong segment.
+
+Casing and spacing are not conflicts: `4A`, `4a` and `4 a` are all treated as the same number, on both the eProstor and the WME side.
 
 Always verify manually.
 
