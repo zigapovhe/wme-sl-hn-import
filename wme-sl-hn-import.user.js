@@ -945,22 +945,35 @@
       zIndexing: true,
       styleContext: {
         getAuditFill: ({ feature }) => feature.properties.type === 'missing' ? '#b04ce6' : '#ffffff',
-        getAuditFillOpacity: ({ feature }) => feature.properties.type === 'missing' ? 1 : 0.15,
+        // The hollow variant used to sit at 0.15, which against WME's pale basemap left
+        // only the ring showing and read as nothing at all.
+        getAuditFillOpacity: ({ feature }) => feature.properties.type === 'missing' ? 1 : 0.6,
+        // Same label-fit sum as the house-number circles, plus a margin. Matching keeps
+        // longer numbers from spilling out of the marker; the margin keeps a marker
+        // bigger than the circle beside it, which is what was making these read as
+        // background and, since handleMapClick takes the nearest centre, made them
+        // fiddly to hit.
+        getAuditRadius: ({ feature }) => {
+          const num = feature.properties.number;
+          return (num ? Math.max(String(num).length * 7, 12) : 12) + 6;
+        },
         getAuditLabel: ({ feature }) => String(feature.properties.number ?? '')
       },
       styleRules: [{
         style: {
           graphicName: 'circle',
-          pointRadius: 11,
+          pointRadius: '${getAuditRadius}',
           fillColor: '${getAuditFill}',
           fillOpacity: '${getAuditFillOpacity}',
           strokeColor: '#b04ce6',
-          strokeWidth: 3,
+          strokeWidth: 4,
           strokeOpacity: 1,
           label: '${getAuditLabel}',
-          fontColor: '#3d0a4d',
+          // White on the solid purple fill: the old dark purple was barely legible
+          // against it. The outline carries the contrast on the hollow variant.
+          fontColor: '#ffffff',
           fontWeight: 'bold',
-          labelOutlineColor: '#ffffff',
+          labelOutlineColor: '#3d0a4d',
           labelOutlineWidth: 2
         }
       }]

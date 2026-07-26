@@ -75,7 +75,14 @@ async function bootScript(storage = {}, whileStubbed = null, options = {}) {
         // visible starts undefined, NOT false. Seeding false made "starts hidden"
         // assertions pass even if the script never hid anything — the test could not
         // tell "explicitly hidden" from "never touched".
-        layers.set(arg.layerName, { visible: undefined, features: [] });
+        // styleContext is kept because only the SDK's renderer ever calls those
+        // functions, so nothing else here would execute them.
+        layers.set(arg.layerName, {
+          visible: undefined,
+          features: [],
+          styleContext: arg.styleContext,
+          styleRules: arg.styleRules
+        });
         return undefined;
       case 'Map.setLayerVisibility':
         if (layers.has(arg.layerName)) layers.get(arg.layerName).visible = arg.visibility;
@@ -238,6 +245,37 @@ test('auto-load enabled: selection handlers run without throwing', async () => {
       }
     }
   );
+});
+
+test('audit markers are drawn larger than the house-number circles', async () => {
+  // The reason the audit markers were reported as barely visible: they were a fixed 11
+  // px while the circles around them size to their label, 12 px and up. A marker
+  // smaller than its neighbours reads as background, and — since handleMapClick picks
+  // the nearest centre — is harder to hit as well.
+  //
+  // Asserts the relationship, not the constants, so the margin can be tuned freely.
+  // Also the only test that executes the style-context functions at all: the SDK's
+  // renderer is their only caller in the browser, so a typo in one is otherwise
+  // invisible here and degrades silently in WME.
+  const { layers } = await bootScript();
+  const audit = layers.get('qhnsl-audit').styleContext;
+  const hn = layers.get('qhnsl-sdk').styleContext;
+  assert.ok(audit && hn, 'both layers should expose a styleContext');
+
+  for (const number of ['4', '12', '12a', '137b']) {
+    const feature = { properties: { number, type: 'missing' } };
+    const auditR = audit.getAuditRadius({ feature });
+    const hnR = hn.getRadius({ feature });
+    assert.ok(Number.isFinite(auditR), `audit radius for "${number}" should be a number`);
+    assert.ok(auditR > hnR,
+      `audit marker for "${number}" must be bigger than the circle (${auditR} vs ${hnR})`);
+  }
+
+  // Both variants must stay visible in their own right: the hollow one was a 0.15
+  // opacity fill, which is what made it vanish against the basemap.
+  const misplaced = { properties: { number: '12', type: 'misplaced' } };
+  assert.ok(audit.getAuditFillOpacity({ feature: misplaced }) >= 0.5,
+    'the misplaced fill must be opaque enough to read against the basemap');
 });
 
 test('a failed auto-load is not retried on the next selection change', () => {
