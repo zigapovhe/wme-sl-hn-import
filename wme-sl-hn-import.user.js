@@ -376,6 +376,10 @@
         segmentId: rec.segmentId,
         lon: rec.lon,
         lat: rec.lat,
+        // EPSG:3794, so the wrong-street pairing can compare metres against a feature's
+        // eX/eY without reprojecting. lon/lat above are for map centring only.
+        eX: rec.x,
+        eY: rec.y,
         streetKeys: Array.from(rec.streetKeys),
         type: numberExistsSomewhere ? 'misplaced' : 'missing'
       });

@@ -228,3 +228,15 @@ test('several unmatched house numbers each produce their own finding', () => {
   assert.strictEqual(findings.length, 2);
   assert.deepStrictEqual(findings.map(f => f.number).sort(), ['97', '98']);
 });
+
+test('a finding carries the projected coordinates the wrong-street pairing needs', () => {
+  // Without these the pairing silently matches nothing, and every other test still passes.
+  const findings = computeAuditFindings(
+    [official('main_st', '12', 100, 100)],
+    wmeIndex({ main_st: [wmeHn({ hnId: '1', num: '99', x: 250, y: 400 })] }),
+    BBOX
+  );
+  assert.strictEqual(findings.length, 1);
+  assert.strictEqual(findings[0].eX, 250);
+  assert.strictEqual(findings[0].eY, 400);
+});
