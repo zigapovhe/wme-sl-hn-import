@@ -1283,6 +1283,35 @@
       suppressAutoLoadUntil = Date.now() + 2000;
       selfSelectionIds = Array.isArray(ids) ? ids.map(String) : null;
     }
+
+    // Select a segment as *our* selection, so the resulting selection-changed event is not
+    // mistaken for the user's. Shared by the audit marker click and the wrong-street click.
+    function selectSegment(segmentId) {
+      try {
+        markSelfSelection([segmentId]);
+        wmeSDK.Editing.setSelection({
+          selection: { ids: [segmentId], objectType: 'segment' }
+        });
+        return true;
+      } catch (e) {
+        console.warn('[SL-HN] could not select segment', segmentId, e);
+        return false;
+      }
+    }
+
+    // The street name WME shows for a segment. Resolved at click time rather than stored:
+    // the keys we keep are normalized ("ulica_b"), which is not a name to show anyone.
+    function wmeStreetNameOfSegment(segmentId) {
+      try {
+        const seg = wmeSDK.DataModel.Segments.getById({ segmentId });
+        if (!seg || !seg.primaryStreetId) return null;
+        const st = wmeSDK.DataModel.Streets.getById({ streetId: seg.primaryStreetId });
+        return st?.name || null;
+      } catch (e) {
+        console.debug('[SL-HN] could not resolve segment street name:', e);
+        return null;
+      }
+    }
     let streetNames = {};
     let streets = {};
     let lastFeatures = [];
@@ -1728,15 +1757,7 @@
       } catch (e) {
         console.debug('[SL-HN] setMapCenter failed:', e);
       }
-      try {
-        markSelfSelection([finding.segmentId]);
-        wmeSDK.Editing.setSelection({
-          selection: { ids: [finding.segmentId], objectType: 'segment' }
-        });
-      } catch (e) {
-        console.warn('[SL-HN] could not select segment for audit finding:', e);
-        return;
-      }
+      if (!selectSegment(finding.segmentId)) return;
       const what = finding.type === 'missing'
         ? `"${finding.number}" is not in eProstor for this street`
         : `"${finding.number}" is more than ${AUDIT_MAX_DISTANCE} m from its eProstor point`;
@@ -1813,6 +1834,24 @@
       // fix-street dialog anyway, which looked like the dialog dismissing itself
       // whenever the map was nudged.
       if (feature.processed) return;
+
+      // Wrong street: the number is in eProstor, just not on the street this WME house
+      // number hangs off. Adding here would duplicate it, so explain and hand over the
+      // segment that actually needs fixing. There is no "add anyway" on purpose.
+      if (feature.wrongStreet) {
+        clearFixStreetState();
+        const officialName = streetNames[feature.street];
+        const wmeName = wmeStreetNameOfSegment(feature.wrongStreet.segmentId);
+        // Toast before the selection, not after: it is the reason the selection changed,
+        // and a setSelection that fails still leaves the user told what is wrong.
+        toast(
+          `"${feature.number}" is on ${wmeName || 'another street'}, but eProstor has it `
+          + `on ${officialName} — fix that house number instead of adding a duplicate`,
+          'warning'
+        );
+        selectSegment(feature.wrongStreet.segmentId);
+        return;
+      }
 
       // A click that will act supersedes any open fix-street dialog.
       clearFixStreetState();
