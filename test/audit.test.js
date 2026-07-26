@@ -402,6 +402,13 @@ test('applying a pair reddens the circle and drops the purple marker', () => {
   assert.deepStrictEqual(remaining, [], 'a wrong-street number is not missing from eProstor');
 });
 
+test('only the paired finding is dropped', () => {
+  const feature = official('ulica_a', '5', 100, 100);
+  const paired = auditFinding({ number: '5', streetKeys: ['ulica_b'], eX: 104, eY: 100 });
+  const other  = auditFinding({ number: '9', streetKeys: ['ulica_b'], eX: 500, eY: 500, hnId: '2' });
+  assert.deepStrictEqual(applyWrongStreetPairs([feature], [paired, other]), [other]);
+});
+
 test('an unpaired finding keeps its marker and leaves the circle alone', () => {
   const feature = official('ulica_a', '5', 100, 100);
   const far = auditFinding({ number: '9', streetKeys: ['ulica_b'], eX: 500, eY: 500 });

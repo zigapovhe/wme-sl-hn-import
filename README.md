@@ -59,6 +59,8 @@ Purple markers, in two kinds:
 
 Hollow markers are the weaker signal — a house number can legitimately sit a building's width from the official point, so treat them as "worth a look", not as proof of an error.
 
+One case is drawn as a red circle instead: when the same number exists in eProstor within 10 m under a different street name — see [🔴 Red conflicts](#-red-conflicts).
+
 **Clicking a marker centers the map and selects the owning segment** (changing your current selection), then tells you why it was flagged. It never edits or deletes anything — fix it yourself with WME's house-number editor.
 
 Only streets present in the loaded eProstor data are audited, and only inside the area that was fetched. Anything outside stays unflagged rather than being wrongly reported as missing, so pan and press Load again to audit a new area.

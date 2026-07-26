@@ -394,8 +394,11 @@
   // house number the audit could explain belongs to the street it is on. Without that
   // second half, two legitimate same-numbered addresses at a corner would flag each other.
   // Pure by design, like computeAuditFindings: read no closure state.
-  //   features: eProstor points, each { number, street, eX, eY, processed }
+  //   features: eProstor points, each { number, street, eX, eY, processed }. Unlike
+  //     computeAuditFindings, this does not re-normalize `number` — callers must have
+  //     already run it through normalizeHN.
   //   findings: computeAuditFindings output
+  // Returned `distance` is metres; nothing in production reads it, only the tests do.
   function findWrongStreetPairs(features, findings) {
     const pairs = [];
     if (!features || !features.length || !findings || !findings.length) return pairs;
@@ -415,14 +418,9 @@
         if (finding.eX == null || finding.eY == null) return;
         // A shared name means the audit already judged this pairing and called it matched
         // or misplaced. Only a genuine name mismatch is the wrong-street case.
-        // Defensive: this can't actually fire on real computeAuditFindings output while
-        // AUDIT_MAX_DISTANCE >= MAX_HN_CONFLICT_DISTANCE — a feature sharing the finding's
-        // street, within MAX_HN_CONFLICT_DISTANCE of it, would already be within the
-        // audit's own match radius and never produce a finding in the first place. Nothing
-        // else in the code enforces that relationship between the two constants, so this
-        // stays as the backstop for if the pairing radius is ever raised past the audit's.
-        // Covered directly by the "a shared street name means the audit already judged it"
-        // test, which hand-builds a finding rather than routing through the audit.
+        // Defensive/unreachable from real computeAuditFindings output while
+        // AUDIT_MAX_DISTANCE >= MAX_HN_CONFLICT_DISTANCE; kept because nothing else in the
+        // code enforces that relationship between the two constants.
         if ((finding.streetKeys || []).includes(feature.street)) return;
 
         const dx = finding.eX - feature.eX;
@@ -1840,7 +1838,7 @@
       // segment that actually needs fixing. There is no "add anyway" on purpose.
       if (feature.wrongStreet) {
         clearFixStreetState();
-        const officialName = streetNames[feature.street];
+        const officialName = streetNames[feature.street] || 'eProstor';
         const wmeName = wmeStreetNameOfSegment(feature.wrongStreet.segmentId);
         // Toast before the selection, not after: it is the reason the selection changed,
         // and a setSelection that fails still leaves the user told what is wrong.
