@@ -23,11 +23,13 @@ After installing the script, you'll see a new **SL-HN** tab in the left sidebar 
 |-------|---------|
 | 🟢 Green | House numbers belonging to the **selected street** (primary or alternate) |
 | 🟠 Orange | House numbers belonging to **other streets** |
-| 🔴 Red | **Conflicts**, e.g. a different nearby existing house number |
+| 🔴 Red | **Conflicts** — a different nearby house number, or this number sitting on the wrong street |
 | ⚪ Faded green | Already present in WME |
 
 ### 👉 Adding house numbers
 **Click any circle to instantly add that house number to the nearest matching segment.**
+
+The one exception is a red wrong-street circle: clicking it explains the mismatch and selects the offending segment instead of adding, because adding would create a duplicate. See [🔴 Red conflicts](#-red-conflicts).
 
 No manual typing is needed — just click.
 
@@ -180,7 +182,13 @@ If house numbers appear 🟠 orange instead of 🟢 green, the WME street name m
 **New in v2.1.0**: The script now warns you about mismatches and suggests corrections! Look for the yellow warning box and use the → button to fix street names with one click.
 
 ### 🔴 Red conflicts
-Red numbers appear when a **different** house number already exists within 10 m — typically a misplaced number sitting on the wrong segment.
+Red circles have two causes.
+
+**A different number is already there.** A *different* house number already exists within 10 m — typically a misplaced number sitting on the wrong segment.
+
+**This number is on the wrong street.** The number exists in eProstor, but the WME house number carrying it is attached to a different street, within 10 m. Clicking the circle does **not** add it — that would leave you with two copies of the number. Instead it tells you which street WME has it on, and selects that segment so you can fix or delete the house number with WME's own editor. There is no "add anyway": if you believe eProstor is the one that is wrong, add the number with WME's house-number editor directly.
+
+Detecting this needs the *other* street to be present in the loaded eProstor data too, and it inherits the audit's silences — it goes quiet after a partial fetch, near the edge of the fetched area, and for house numbers outside the current viewport.
 
 Casing and spacing are not conflicts: `4A`, `4a` and `4 a` are all treated as the same number, on both the eProstor and the WME side.
 
