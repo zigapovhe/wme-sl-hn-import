@@ -2361,9 +2361,17 @@
         });
 
         try {
-          lastAuditFindings = computeAuditFindings(lastFeatures, selectionHNMap, lastLoadedBbox);
+          lastAuditFindings = applyWrongStreetPairs(
+            lastFeatures,
+            computeAuditFindings(lastFeatures, selectionHNMap, lastLoadedBbox)
+          );
         } catch (e) {
           lastAuditFindings = [];
+          // A throw part-way through the apply would leave circles marked while the
+          // findings are gone. Not worth recomputing `conflict`: a leftover red without
+          // wrongStreet behaves as an ordinary conflict circle, which is how it behaved
+          // before this existed, and the next recompute corrects it.
+          lastFeatures.forEach(f => { if (f) f.wrongStreet = null; });
           console.warn('[SL-HN] audit failed:', e);
         }
 
@@ -2619,9 +2627,13 @@
                 console.warn('[SL-HN] partial address data: reverse audit disabled for this load');
               }
               try {
-                lastAuditFindings = computeAuditFindings(lastFeatures, selectionHNMap, lastLoadedBbox);
+                lastAuditFindings = applyWrongStreetPairs(
+                  lastFeatures,
+                  computeAuditFindings(lastFeatures, selectionHNMap, lastLoadedBbox)
+                );
               } catch (e) {
                 lastAuditFindings = [];
+                lastFeatures.forEach(f => { if (f) f.wrongStreet = null; });
                 console.warn('[SL-HN] audit failed:', e);
               }
 
