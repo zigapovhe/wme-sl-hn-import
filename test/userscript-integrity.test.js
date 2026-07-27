@@ -67,6 +67,7 @@ test('only pure functions are exported', () => {
     'hasConflict', 'computeAuditFindings', 'findWrongStreetPairs', 'applyWrongStreetPairs',
     'computeFetchBbox', 'isSelectionInsideBbox',
     'decideAutoLoad', 'makeFeatKey',
+    'classifyFetchFailure', 'decideFetchRetry', 'fetchRetryDelay',
     'NON_ADDRESSABLE_ROAD_TYPES',
     'AUDIT_MAX_DISTANCE', 'MAX_HN_CONFLICT_DISTANCE'
   ]);

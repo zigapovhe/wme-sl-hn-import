@@ -91,6 +91,21 @@
   const EPROSTOR_LIMIT = 1000;
   const EPROSTOR_MAX_PAGES = 30; // hard cap: 30 pages × 1000 addresses per load
 
+  // eProstor times out at random, on areas of any size — transport flakiness rather than a
+  // slow query, which is the class another attempt recovers.
+  //
+  // The timeout stays at 30 s deliberately. If failures are random then a shorter timeout
+  // plus a retry recovers faster than one long wait, but a 500 m buffer over a dense area
+  // plausibly has legitimate 20-28 s pages that a shorter timeout would start killing.
+  // Trading working loads for faster failure recovery needs measurement first.
+  //
+  // The per-load budget is what bounds the damage: without it, 30 pages at ~94 s of
+  // retrying each is a 47-minute worst case reachable by clicking Load.
+  const FETCH_TIMEOUT_MS = 30000;
+  const FETCH_PAGE_RETRIES = 2;                 // 3 attempts per page
+  const FETCH_RETRY_BACKOFF_MS = [1000, 3000];
+  const FETCH_RETRY_BUDGET = 4;                 // retries per load, across all pages
+
   // Shown in the status box on startup and after Clear
   const INSTRUCTIONS_HTML = `<b>Instructions</b><br/>
     1) Select a segment • 2) Click "Load selected street" • 3) <b>Click house numbers on map to add them</b><br/>
@@ -627,6 +642,47 @@
     return `E>=${minE} AND E<=${maxE} AND N>=${minN} AND N<=${maxN} AND ST_STANOVANJA IS NULL`;
   }
 
+  // What went wrong with one page request, and is it worth another attempt?
+  //   kind:   'timeout' | 'error' | 'load'  — which GM_xmlhttpRequest handler fired
+  //   status: HTTP status when there is one
+  // `reason` is user-facing and completes the sentence "eProstor ...", so the message can
+  // say what actually happened instead of blaming every failure on a timeout.
+  //
+  // The 4xx/5xx split is not decoration: a non-2xx response reaches onload and dies inside
+  // JSON.parse, which is why a rejected query used to surface as "Unexpected token <".
+  function classifyFetchFailure(kind, status) {
+    if (kind === 'timeout') return { retryable: true, reason: 'timed out' };
+    if (kind === 'error') return { retryable: true, reason: 'request failed' };
+    if (typeof status === 'number' && status >= 500) {
+      return { retryable: true, reason: 'returned a server error' };
+    }
+    if (typeof status === 'number' && status >= 400) {
+      // Our query is what it objects to. Repeating it verbatim cannot help, and would
+      // spend the retry budget a genuinely flaky page might need.
+      return { retryable: false, reason: `rejected the request (HTTP ${status})` };
+    }
+    return { retryable: false, reason: 'returned an unreadable response' };
+  }
+
+  // Given that verdict and the budget spent so far, what happens next.
+  //   'retry'   — same page, same startIndex, after a backoff
+  //   'partial' — stop, keep the pages that did arrive (complete: false)
+  //   'fail'    — stop with nothing to keep
+  // Pure, like decideAutoLoad, so the policy is testable without a browser or a network.
+  function decideFetchRetry({ retryable, attempt, retriesUsed, haveFeatures }) {
+    if (retryable && attempt <= FETCH_PAGE_RETRIES && retriesUsed < FETCH_RETRY_BUDGET) {
+      return 'retry';
+    }
+    return haveFeatures ? 'partial' : 'fail';
+  }
+
+  // Backoff before re-issuing `attempt`. Clamped, so the table can be shorter than the
+  // retry count without the last waits collapsing to undefined.
+  function fetchRetryDelay(attempt) {
+    const i = Math.max(0, Math.min(attempt - 1, FETCH_RETRY_BACKOFF_MS.length - 1));
+    return FETCH_RETRY_BACKOFF_MS[i];
+  }
+
   // Fetch addresses from EProstor API with pagination. shouldAbort (optional)
   // is checked between pages so a Clear / newer Load stops the request chain.
   //
@@ -640,13 +696,61 @@
       const allFeatures = [];
       let startIndex = 0;
       let pageCount = 0;
+      let retriesUsed = 0;
 
-      function fetchPage() {
-        if (typeof shouldAbort === 'function' && shouldAbort()) {
+      const aborted = () => typeof shouldAbort === 'function' && shouldAbort();
+
+      // One page failed. Retry it, settle for what we have, or give up — and say which,
+      // because the alternative is a spinner that can sit there for a minute and a half
+      // with nothing to explain it.
+      function handleFailure(attempt, kind, status) {
+        const { retryable, reason } = classifyFetchFailure(kind, status);
+        const verdict = decideFetchRetry({
+          retryable, attempt, retriesUsed, haveFeatures: allFeatures.length > 0
+        });
+
+        if (verdict === 'retry') {
+          retriesUsed++;
+          toast(
+            `eProstor ${reason} — retrying (attempt ${attempt + 1} of ${FETCH_PAGE_RETRIES + 1})`,
+            'warning'
+          );
+          // Re-check after the wait, not just before it: a Clear or a newer Load during
+          // the backoff must stop the chain, or this resolves into a load the user has
+          // already thrown away.
+          setTimeout(() => {
+            if (aborted()) { resolve({ features: allFeatures, complete: false }); return; }
+            requestPage(attempt + 1);
+          }, fetchRetryDelay(attempt));
+          return;
+        }
+
+        if (verdict === 'partial') {
+          console.warn(`[SL-HN] EProstor ${reason}; result is partial`);
+          toast(
+            `eProstor ${reason} — showing ${allFeatures.length} addresses that loaded, `
+            + 'audit off for this area',
+            'warning'
+          );
+          resolve({ features: allFeatures, complete: false });
+          return;
+        }
+
+        const err = new Error(`EProstor ${reason}`);
+        // Preferred over the caller's generic "Error fetching address data.", which reads
+        // as vague after two messages that named the actual problem.
+        err.userMessage = `eProstor ${reason} — no addresses loaded`;
+        reject(err);
+      }
+
+      function requestPage(attempt) {
+        if (aborted()) {
           resolve({ features: allFeatures, complete: false }); // caller discards stale results anyway
           return;
         }
-        if (++pageCount > EPROSTOR_MAX_PAGES) {
+        // Counted once per page, not once per attempt: a retry re-fetches the same
+        // startIndex, so charging it to the page cap would shorten the box we cover.
+        if (attempt === 1 && ++pageCount > EPROSTOR_MAX_PAGES) {
           console.warn(`[SL-HN] EProstor result truncated at ${EPROSTOR_MAX_PAGES} pages — reduce the buffer`);
           toast('Too many addresses in area — result truncated, reduce the buffer', 'warning');
           resolve({ features: allFeatures, complete: false });
@@ -663,51 +767,47 @@
         GM_xmlhttpRequest({
           method: 'GET',
           url: url,
-          timeout: 30000,
+          timeout: FETCH_TIMEOUT_MS,
           onload: function (response) {
+            let data;
             try {
-              const data = JSON.parse(response.responseText);
-
-              if (!data.features || !Array.isArray(data.features)) {
-                if (allFeatures.length > 0) {
-                  // Keep what we have, but it is not the whole box.
-                  console.warn('[SL-HN] EProstor returned an invalid page; result is partial');
-                  resolve({ features: allFeatures, complete: false });
-                } else {
-                  reject(new Error('Invalid API response'));
-                }
-                return;
-              }
-
-              allFeatures.push(...data.features);
-
-              // Check if there are more pages: trust numberMatched when the
-              // server provides it, otherwise assume a full page means more.
-              const returned = data.numberReturned || data.features.length;
-              const total = typeof data.numberMatched === 'number' ? data.numberMatched : null;
-              const hasMore = total != null
-                ? startIndex + returned < total
-                : returned >= EPROSTOR_LIMIT;
-              if (hasMore && returned > 0) {
-                startIndex += returned;
-                fetchPage();
-              } else {
-                resolve({ features: allFeatures, complete: true });
-              }
+              data = JSON.parse(response.responseText);
             } catch (err) {
-              reject(err);
+              handleFailure(attempt, 'load', response.status);
+              return;
+            }
+
+            if (!data.features || !Array.isArray(data.features)) {
+              handleFailure(attempt, 'load', response.status);
+              return;
+            }
+
+            allFeatures.push(...data.features);
+
+            // Check if there are more pages: trust numberMatched when the
+            // server provides it, otherwise assume a full page means more.
+            const returned = data.numberReturned || data.features.length;
+            const total = typeof data.numberMatched === 'number' ? data.numberMatched : null;
+            const hasMore = total != null
+              ? startIndex + returned < total
+              : returned >= EPROSTOR_LIMIT;
+            if (hasMore && returned > 0) {
+              startIndex += returned;
+              requestPage(1);
+            } else {
+              resolve({ features: allFeatures, complete: true });
             }
           },
-          onerror: function (err) {
-            reject(err);
+          onerror: function () {
+            handleFailure(attempt, 'error');
           },
           ontimeout: function () {
-            reject(new Error('EProstor request timed out after 30s'));
+            handleFailure(attempt, 'timeout');
           }
         });
       }
 
-      fetchPage();
+      requestPage(1);
     });
   }
 
@@ -2844,7 +2944,9 @@
               loading.style.display = 'none';
               if (loadId === currentLoadId) {
                 statusDiv.textContent = 'Error fetching address data. See console.';
-                toast('Error fetching address data.', 'error');
+                // fetchAddresses names what actually went wrong; anything else falls back
+                // to the generic line.
+                toast(err?.userMessage || 'Error fetching address data.', 'error');
               }
               resolve();
             });
@@ -3041,6 +3143,9 @@
       computeFetchBbox,
       isSelectionInsideBbox,
       decideAutoLoad,
+      classifyFetchFailure,
+      decideFetchRetry,
+      fetchRetryDelay,
       makeFeatKey,
       NON_ADDRESSABLE_ROAD_TYPES,
       AUDIT_MAX_DISTANCE,

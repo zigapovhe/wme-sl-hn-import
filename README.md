@@ -206,6 +206,11 @@ If you select a segment **without** a street name:
 ### 📡 Accuracy
 EProstor coordinates are normally precise, but always visually verify before adding.
 
+### ⏳ When eProstor is slow
+Requests time out after 30 seconds, sometimes at random and on areas of any size. A page that times out, fails at the network level or comes back with a server error is re-issued up to twice, one second and then three seconds later, and a toast tells you each time so a long wait is never unexplained. A load spends at most four retries in total, so a service having a bad day cannot turn one click into a very long spinner.
+
+If the retries run out, the addresses that did arrive are still drawn — but the reverse audit switches off for that area, because it must never call an address missing when the truth is that it was never fetched. A request eProstor *rejects* (a bad query rather than a bad moment) is not retried; the message says so instead.
+
 ---
 
 ## 🛠️ Installation
