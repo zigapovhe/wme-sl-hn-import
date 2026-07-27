@@ -391,15 +391,50 @@ test('a wrong street absent from the loaded data cannot be detected', () => {
   assert.deepStrictEqual(findWrongStreetPairs(features, findings), []);
 });
 
-test('applying a pair reddens the circle and drops the purple marker', () => {
+test('applying a pair marks the circle and drops the purple marker', () => {
   const feature = official('ulica_a', '5', 100, 100);
   const finding = auditFinding({
     number: '5', streetKeys: ['ulica_b'], eX: 104, eY: 100, segmentId: 777
   });
   const remaining = applyWrongStreetPairs([feature], [finding]);
-  assert.strictEqual(feature.conflict, true);
-  assert.deepStrictEqual(feature.wrongStreet, { segmentId: 777 });
+  assert.deepStrictEqual(feature.wrongStreet, { segmentId: 777, streetKeys: ['ulica_b'] });
   assert.deepStrictEqual(remaining, [], 'a wrong-street number is not missing from eProstor');
+});
+
+test('the marking carries the street keys the house number is indexed under', () => {
+  // Both, not just the primary: the renderer needs them to keep this circle visible while
+  // "selected street only" is showing the WME street, and the click needs them to name the
+  // street that actually carries the number when an alternate name produced the match.
+  const feature = official('ulica_a', '5', 100, 100);
+  const finding = auditFinding({
+    number: '5', streetKeys: ['ulica_b', 'ulica_c'], eX: 104, eY: 100, segmentId: 777
+  });
+  applyWrongStreetPairs([feature], [finding]);
+  assert.deepStrictEqual(feature.wrongStreet.streetKeys, ['ulica_b', 'ulica_c']);
+});
+
+test('applying a pair does not touch conflict', () => {
+  // The red is derived from wrongStreet at render time. Writing a second field here would
+  // mean two owners for one fact, and this function resets only one of them.
+  const feature = official('ulica_a', '5', 100, 100);
+  const finding = auditFinding({
+    number: '5', streetKeys: ['ulica_b'], eX: 104, eY: 100, segmentId: 777
+  });
+  applyWrongStreetPairs([feature], [finding]);
+  assert.strictEqual('conflict' in feature, false);
+});
+
+test('a marking is cleared even when nothing else about the feature changes', () => {
+  // The trap: applyWrongStreetPairs resets wrongStreet on every feature, so the reset has
+  // to be the whole story. Anything it wrote and did not reset would survive the user
+  // fixing the street.
+  const feature = { ...official('ulica_a', '5', 100, 100), wrongStreet: { segmentId: 1 } };
+  const other = official('ulica_a', '9', 500, 500);
+  applyWrongStreetPairs([feature, other], [
+    auditFinding({ number: '9', streetKeys: ['ulica_b'], eX: 504, eY: 500, segmentId: 42 })
+  ]);
+  assert.strictEqual(feature.wrongStreet, null, 'the stale marking is gone');
+  assert.strictEqual('conflict' in feature, false, 'and left no red behind to explain');
 });
 
 test('only the paired finding is dropped', () => {
@@ -421,10 +456,30 @@ test('an unpaired finding keeps its marker and leaves the circle alone', () => {
 test('a marking from a previous run is cleared before re-applying', () => {
   // The trap this guards: the user fixes the street, the pair disappears, and a stale
   // marking would leave the circle refusing the add forever.
-  const feature = { ...official('ulica_a', '5', 100, 100), wrongStreet: { segmentId: 777 } };
+  const feature = {
+    ...official('ulica_a', '5', 100, 100),
+    wrongStreet: { segmentId: 777, streetKeys: ['ulica_b'] }
+  };
   const remaining = applyWrongStreetPairs([feature], []);
   assert.strictEqual(feature.wrongStreet, null);
   assert.deepStrictEqual(remaining, []);
+});
+
+test('a non-finite coordinate pairs with nothing', () => {
+  // NaN passes every comparison in the distance test (NaN > maxSq is false), so an
+  // unguarded NaN would pair with everything in range and then scramble the sort that
+  // makes the pairing one-to-one. proj4 rejects non-finite input today; this keeps the
+  // invariant local rather than borrowed.
+  const finding = auditFinding({ number: '5', streetKeys: ['ulica_b'], eX: 104, eY: 100 });
+  assert.deepStrictEqual(findWrongStreetPairs([official('ulica_a', '5', NaN, 100)], [finding]), []);
+  assert.deepStrictEqual(findWrongStreetPairs([official('ulica_a', '5', 100, NaN)], [finding]), []);
+  assert.deepStrictEqual(
+    findWrongStreetPairs(
+      [official('ulica_a', '5', 100, 100)],
+      [auditFinding({ number: '5', streetKeys: ['ulica_b'], eX: NaN, eY: 100 })]
+    ),
+    []
+  );
 });
 
 test('applying nothing returns the findings untouched', () => {

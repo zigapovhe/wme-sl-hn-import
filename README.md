@@ -59,7 +59,7 @@ Purple markers, in two kinds:
 
 Hollow markers are the weaker signal — a house number can legitimately sit a building's width from the official point, so treat them as "worth a look", not as proof of an error.
 
-One case is drawn as a red circle instead: when the same number exists in eProstor within 10 m under a different street name — see [🔴 Red conflicts](#-red-conflicts).
+One case is drawn as a red circle instead of a marker: when the same number exists in eProstor within 10 m under a different street name — see [🔴 Red conflicts](#-red-conflicts). The sidebar still counts those cases alongside the marker counts, so an area whose problems are all of this kind does not read as a clean audit.
 
 **Clicking a marker centers the map and selects the owning segment** (changing your current selection), then tells you why it was flagged. It never edits or deletes anything — fix it yourself with WME's house-number editor.
 
@@ -188,7 +188,9 @@ Red circles have two causes.
 
 **A different number is already there.** A *different* house number already exists within 10 m — typically a misplaced number sitting on the wrong segment.
 
-**This number is on the wrong street.** The number exists in eProstor, but the WME house number carrying it is attached to a different street, within 10 m. Clicking the circle does **not** add it — that would leave you with two copies of the number. Instead it tells you which street WME has it on, and selects that segment so you can fix or delete the house number with WME's own editor. There is no "add anyway": if you believe eProstor is the one that is wrong, add the number with WME's house-number editor directly.
+**This number is on the wrong street.** The number exists in eProstor, but the WME house number carrying it is attached to a different street, within 10 m. Clicking the circle does **not** add it — that would leave you with two copies of the number. Instead it names the street WME has it under (including an alternate name, if that is the one carrying it) and selects that segment so you can fix or delete the house number with WME's own editor. If that segment is no longer loaded, the message says so rather than leaving you to act on a selection that never changed. There is no "add anyway": if you believe eProstor is the one that is wrong, add the number with WME's house-number editor directly.
+
+These circles stay visible under **Show only the selected street** whichever of the two streets is selected — otherwise the one warning left for the case would vanish exactly when you select the segment that needs fixing. A house number you attached yourself with **Add anyway** is not treated as a wrong-street case, so the script does not turn around and flag the edit it made on your instruction.
 
 Detecting this needs the *other* street to be present in the loaded eProstor data too, and it inherits the audit's silences — it goes quiet after a partial fetch, near the edge of the fetched area, and for house numbers outside the current viewport.
 

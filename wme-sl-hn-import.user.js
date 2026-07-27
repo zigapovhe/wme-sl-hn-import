@@ -82,7 +82,7 @@
   // Shown in the status box on startup and after Clear
   const INSTRUCTIONS_HTML = `<b>Instructions</b><br/>
     1) Select a segment • 2) Click "Load selected street" • 3) <b>Click house numbers on map to add them</b><br/>
-    Green = selected street • Orange = other streets • Red = possible wrong HN • Faded = already in WME`;
+    Green = selected street • Orange = other streets • Red = conflict or wrong street • Faded = already in WME`;
 
   // Common Slovenian street name abbreviations
   const ABBREVIATIONS = {
@@ -408,19 +408,27 @@
 
     features.forEach(feature => {
       if (!feature || feature.processed) return;
-      if (!feature.number || feature.eX == null || feature.eY == null) return;
+      // Number.isFinite, not != null: a NaN coordinate passes every comparison below
+      // (distSq > maxSq is false for NaN), so it would pair with everything and then
+      // wreck the sort. proj4 rejects non-finite input today, but that is its invariant
+      // to keep, not ours.
+      if (!feature.number || !Number.isFinite(feature.eX) || !Number.isFinite(feature.eY)) return;
 
       findings.forEach(finding => {
         // 'misplaced' means the number *was* found on that street, just far away. That is
         // a different diagnosis and keeps its own purple marker.
         if (finding.type !== 'missing') return;
         if (finding.number !== feature.number) return;
-        if (finding.eX == null || finding.eY == null) return;
+        if (!Number.isFinite(finding.eX) || !Number.isFinite(finding.eY)) return;
         // A shared name means the audit already judged this pairing and called it matched
         // or misplaced. Only a genuine name mismatch is the wrong-street case.
-        // Defensive/unreachable from real computeAuditFindings output while
-        // AUDIT_MAX_DISTANCE >= MAX_HN_CONFLICT_DISTANCE; kept because nothing else in the
-        // code enforces that relationship between the two constants.
+        // Unreachable when both arguments come from the same feature array, as both call
+        // sites pass them: a feature whose own street key carries this number indexed
+        // itself into `official`, so computeAuditFindings typed the finding 'misplaced'
+        // and the check above already returned. The distance constants have nothing to do
+        // with it — AUDIT_MAX_DISTANCE only ever chooses between no finding and
+        // 'misplaced'. Kept for callers that mix a finding list with a different feature
+        // list, and because it costs one array lookup.
         if ((finding.streetKeys || []).includes(feature.street)) return;
 
         const dx = finding.eX - feature.eX;
@@ -447,9 +455,13 @@
     return pairs;
   }
 
-  // Applies the wrong-street verdict. The circle becomes a conflict so it reads as "do not
-  // just add this", and the finding is dropped so no purple marker claims the number is
-  // absent from eProstor when it plainly is not.
+  // Applies the wrong-street verdict: the circle records which WME house number it clashes
+  // with, and the finding is dropped so no purple marker claims the number is absent from
+  // eProstor when it plainly is not.
+  // `wrongStreet` is the only field written, deliberately. An earlier version also set
+  // `conflict` — one fact in two fields, with only one of them reset below, so a stale red
+  // could outlive its own explanation. The red is derived from `wrongStreet` at render time
+  // instead, which makes this reset the whole story.
   // Clearing every feature first is not optional: a marking left from the previous run
   // would survive the user fixing the street and keep refusing the add, the same trap the
   // wme-after-edit handler recomputes to avoid.
@@ -461,10 +473,14 @@
 
     const paired = new Set();
     pairs.forEach(({ feature, finding }) => {
-      feature.conflict = true;
-      // Only segmentId: it is all the click needs to name the WME street, and the finding
-      // it came from is gone by the time anything reads this.
-      feature.wrongStreet = { segmentId: finding.segmentId };
+      feature.wrongStreet = {
+        segmentId: finding.segmentId,
+        // The street keys WME has this house number under. The click needs them to name
+        // the right one when an alternate name carried the match, and the "selected street
+        // only" filter needs them to keep this circle on screen while that street is the
+        // selected one — which is exactly the state the click itself creates.
+        streetKeys: finding.streetKeys || []
+      };
       paired.add(finding);
     });
 
@@ -969,13 +985,17 @@
       styleContext: {
         getFillColor: ({ feature }) => {
           const p = feature.properties;
-          if (p.fixHighlight) return '#4da6ff';
+          // Conflict before fixHighlight. Blue means "click me and I get added on rename",
+          // and the fix-street highlight covers a whole street — including circles the
+          // click refuses. A wrong-street circle showing blue promised the one thing it
+          // will never do.
           if (p.conflict) return '#ff6666';
+          if (p.fixHighlight) return '#4da6ff';
           return p.isSelectedStreet ? '#99ee99' : '#fb9c4f';
         },
         getOpacity: ({ feature }) => {
           const p = feature.properties;
-          if (p.fixHighlight || p.conflict) return 1;
+          if (p.conflict || p.fixHighlight) return 1;
           return (p.isSelectedStreet && p.processed) ? 0.3 : 1;
         },
         getRadius: ({ feature }) => {
@@ -1285,13 +1305,24 @@
     // Select a segment as *our* selection, so the resulting selection-changed event is not
     // mistaken for the user's. Shared by the audit marker click and the wrong-street click.
     function selectSegment(segmentId) {
+      let marked = false;
       try {
+        // Already the entire selection: setSelection raises no selection-changed event, so
+        // marking it as ours would arm selfSelectionIds for an event that never arrives,
+        // and the user's next deliberate selection of this segment would be dropped as
+        // ours. Nothing rules this out — the segment a wrong-street circle points at can
+        // easily be the one already selected.
+        if (isSameSelection(getSelectedSegments().map(seg => seg.id), [segmentId])) return true;
         markSelfSelection([segmentId]);
+        marked = true;
         wmeSDK.Editing.setSelection({
           selection: { ids: [segmentId], objectType: 'segment' }
         });
         return true;
       } catch (e) {
+        // Disarm what we armed: with no selection event, nothing will consume the marker,
+        // and leaving it set silently swallows the next auto-load for this segment.
+        if (marked) selfSelectionIds = null;
         console.warn('[SL-HN] could not select segment', segmentId, e);
         return false;
       }
@@ -1299,12 +1330,23 @@
 
     // The street name WME shows for a segment. Resolved at click time rather than stored:
     // the keys we keep are normalized ("ulica_b"), which is not a name to show anyone.
-    function wmeStreetNameOfSegment(segmentId) {
+    // preferKeys are the normalized keys the caller cares about: a house number is indexed
+    // under a segment's primary AND alternate names, so the name that produced a match is
+    // not necessarily the primary one, and naming the primary would send the user looking
+    // under a street that carries no such house number.
+    function wmeStreetNameOfSegment(segmentId, preferKeys) {
       try {
         const seg = wmeSDK.DataModel.Segments.getById({ segmentId });
-        if (!seg || !seg.primaryStreetId) return null;
-        const st = wmeSDK.DataModel.Streets.getById({ streetId: seg.primaryStreetId });
-        return st?.name || null;
+        if (!seg) return null;
+        const streetIds = [];
+        if (seg.primaryStreetId) streetIds.push(seg.primaryStreetId);
+        (seg.alternateStreetIds || []).forEach(id => { if (id) streetIds.push(id); });
+        const names = streetIds
+          .map(streetId => wmeSDK.DataModel.Streets.getById({ streetId })?.name)
+          .filter(Boolean);
+        if (!names.length) return null;
+        const wanted = new Set(preferKeys || []);
+        return names.find(name => wanted.has(normalizeStreetName(name))) || names[0];
       } catch (e) {
         console.debug('[SL-HN] could not resolve segment street name:', e);
         return null;
@@ -1367,6 +1409,13 @@
     // houseNumberId the SDK events provide.
     const deletedHnIds = new Set();     // HNs deleted this session (still in saved model until save)
     const sessionAddedKeys = new Set(); // feature keys we added this session (not yet in saved model)
+    // Keys added via "Add anyway", i.e. onto a segment named something other than the
+    // official street. WME indexes those under the segment's own name, so they never show
+    // up for this address — unlike sessionAddedKeys, this set is NOT cleared on save.
+    // The second set is write-once, and exists only so a redo can tell an ordinary
+    // session add from an "add anyway" one, which the id → key mapping does not record.
+    const addedAnywayKeys = new Set();
+    const everAddedAnywayKeys = new Set();
     const hnIdToAddedKey = new Map();   // added houseNumberId -> feature key, to undo on later delete
     let pendingAddKey = null;           // set just before addHouseNumber, consumed by the added event
     const featKey = makeFeatKey;
@@ -1728,7 +1777,13 @@
     function isFeatureVisible(feat) {
       if (chkMissing?.hasAttribute('checked') && feat.processed) return false;
       if (chkSelectedOnly?.hasAttribute('checked') && currentStreetId
-          && feat.street !== currentStreetId && feat.street !== fixStreetHighlightStreetId) return false;
+          && feat.street !== currentStreetId && feat.street !== fixStreetHighlightStreetId
+          // A wrong-street circle is the only diagnostic left for its case — the purple
+          // marker was dropped as a duplicate of it — and the WME street it points at is
+          // by construction not its own. Filtering on `street` alone therefore hid it
+          // exactly when the selected street was the one that needs fixing, including
+          // after this circle's own click selected that segment.
+          && !(feat.wrongStreet?.streetKeys || []).includes(currentStreetId)) return false;
       return true;
     }
 
@@ -1826,6 +1881,33 @@
 
     wmeSDK.Events.on({ eventName: 'wme-map-mouse-click', eventHandler: handleMapClick });
 
+    // Refuse a wrong-street add and hand the user the segment that needs fixing. Shared by
+    // the circle click and by addHouseNumberToSegment, because the fix-street dialog is
+    // modeless: it survives pans, and a pan recomputes states on the very feature object
+    // the dialog closed over, so a feature can become a wrong-street case while its dialog
+    // is open. Guarding only at the click let "Add anyway" and the post-rename auto-add
+    // create the duplicate this marking exists to prevent.
+    function explainWrongStreet(feature) {
+      clearFixStreetState();
+      const officialName = streetNames[feature.street] || 'eProstor';
+      const wmeName = wmeStreetNameOfSegment(
+        feature.wrongStreet.segmentId, feature.wrongStreet.streetKeys
+      );
+      const where = wmeName ? `on ${wmeName}` : 'on another street';
+      // The segment id is cached from the last audit run, so it can be gone — split,
+      // deleted, or panned out of the model. Say so rather than telling the user to go
+      // fix a segment that was never selected: the panel's rename button acts on whatever
+      // IS selected, which would rename an innocent street.
+      const selected = selectSegment(feature.wrongStreet.segmentId);
+      toast(
+        `"${feature.number}" is ${where}, but eProstor has it on ${officialName} — `
+        + (selected
+          ? 'fix that house number instead of adding a duplicate'
+          : 'that segment is no longer loaded, so nothing was selected'),
+        'warning'
+      );
+    }
+
     function onFeatureClick(feature) {
       // Clear AFTER deciding we will act, not before. A click that does nothing —
       // most often on an already-added, faded circle — used to close an open
@@ -1837,17 +1919,7 @@
       // number hangs off. Adding here would duplicate it, so explain and hand over the
       // segment that actually needs fixing. There is no "add anyway" on purpose.
       if (feature.wrongStreet) {
-        clearFixStreetState();
-        const officialName = streetNames[feature.street] || 'eProstor';
-        const wmeName = wmeStreetNameOfSegment(feature.wrongStreet.segmentId);
-        // Toast before the selection, not after: it is the reason the selection changed,
-        // and a setSelection that fails still leaves the user told what is wrong.
-        toast(
-          `"${feature.number}" is on ${wmeName || 'another street'}, but eProstor has it `
-          + `on ${officialName} — fix that house number instead of adding a duplicate`,
-          'warning'
-        );
-        selectSegment(feature.wrongStreet.segmentId);
+        explainWrongStreet(feature);
         return;
       }
 
@@ -1889,8 +1961,17 @@
       startFixStreetFlow(feature, streetName, nearest.segment);
     }
 
-    // Attach a house number to a segment (shared by direct add, "add anyway" and post-rename auto-add)
-    function addHouseNumberToSegment(feature, segment) {
+    // Attach a house number to a segment (shared by direct add, "add anyway" and post-rename auto-add).
+    // `anyway` marks the deliberate mismatch: the official street name exists nowhere in
+    // WME and the user chose this differently-named segment regardless.
+    function addHouseNumberToSegment(feature, segment, { anyway = false } = {}) {
+      // The single choke point for every add path, so a feature that turned into a
+      // wrong-street case after its dialog opened cannot slip through one of them.
+      if (feature.wrongStreet) {
+        explainWrongStreet(feature);
+        return;
+      }
+
       markSelfSelection([segment.id]);
       wmeSDK.Editing.setSelection({ selection: { ids: [segment.id], objectType: 'segment' } });
 
@@ -1906,6 +1987,15 @@
 
         // Remember this add: fetchHouseNumbers won't report it until the editor saves.
         sessionAddedKeys.add(key);
+        // An "add anyway" lands on a segment that is, by construction, named something
+        // else — so WME indexes the house number under that other name and this address
+        // never reads as added, no matter how many times it is recomputed. Without a
+        // record that survives the save, the next audit run pairs the two and reddens the
+        // circle the script itself filled in, accusing the user of the edit they asked
+        // for. Known gap: deleting such a house number after a save leaves the key behind
+        // (the id → key mapping the delete handlers use is cleared at save), so the circle
+        // stays faded until the next Load.
+        if (anyway) { addedAnywayKeys.add(key); everAddedAnywayKeys.add(key); }
         feature.processed = true;
         feature.conflict = false;
         applyFeatureFilter();
@@ -1994,7 +2084,7 @@
         },
         onAddAnyway: () => {
           clearFixStreetState();
-          addHouseNumberToSegment(feature, addAnywaySegment);
+          addHouseNumberToSegment(feature, addAnywaySegment, { anyway: true });
         },
         onCancel: () => {
           clearFixStreetState();
@@ -2306,14 +2396,20 @@
         })));
 
         if (!auditSummaryDiv) return;
-        if (!visibleFindings.length) {
+        // Wrong-street cases are audit results too — their finding was dropped precisely
+        // because the red circle already says it. Counting them here is what keeps an area
+        // whose findings are *all* wrong-street pairs from reading exactly like an area
+        // where the audit found nothing.
+        const wrongStreet = lastFeatures.filter(f => f.wrongStreet && isFeatureVisible(f)).length;
+        if (!visibleFindings.length && !wrongStreet) {
           auditSummaryDiv.style.display = 'none';
           return;
         }
         const missing = visibleFindings.filter(f => f.type === 'missing').length;
         const misplaced = visibleFindings.filter(f => f.type === 'misplaced').length;
         auditSummaryDiv.innerHTML =
-          `<b style="color:#b04ce6;">Audit:</b> ${missing} not in eProstor · ${misplaced} misplaced`;
+          `<b style="color:#b04ce6;">Audit:</b> ${missing} not in eProstor · ${misplaced} misplaced`
+          + (wrongStreet ? ` · <span style="color:#c0392b;">${wrongStreet} on the wrong street</span>` : '');
         auditSummaryDiv.style.display = 'block';
       };
 
@@ -2332,7 +2428,12 @@
             number: feat.number,
             street: feat.street,
             processed: feat.processed,
-            conflict: feat.conflict,
+            // Derived, not stored twice. Both causes of a red circle — a different number
+            // already within 10 m, and this number sitting under another street name —
+            // are owned by different passes, and keeping a second `conflict` flag in sync
+            // with wrongStreet meant one pass could clear its own field and leave the
+            // other's red behind, with nothing to explain it.
+            conflict: feat.conflict || feat.wrongStreet != null,
             isSelectedStreet: feat.street === currentStreetId,
             fixHighlight: fixStreetHighlightStreetId != null && feat.street === fixStreetHighlightStreetId
           }
@@ -2378,17 +2479,53 @@
       // WME (entry) OR added this session but not saved yet.
       function computeFeatureState(streetId, hn, x, y, selectionHNMap) {
         const entry = selectionHNMap.get(streetId);
-        const processed = entry?.set.has(hn) === true || sessionAddedKeys.has(featKey(streetId, hn, x, y));
+        const key = featKey(streetId, hn, x, y);
+        const processed = entry?.set.has(hn) === true
+          || sessionAddedKeys.has(key)
+          || addedAnywayKeys.has(key);
         const conflict = !processed && hasConflict(hn, x, y, entry);
         return { processed, conflict };
       }
 
+      // The audit and the wrong-street reconciliation, in one place. Both the initial Load
+      // and every later recalculation run it, and they used to hold near-identical copies
+      // that were already drifting — one carried the comment explaining the recovery, the
+      // other silently did the same thing.
+      function runAudit(features, selectionHNMap) {
+        try {
+          return applyWrongStreetPairs(
+            features,
+            computeAuditFindings(features, selectionHNMap, lastLoadedBbox)
+          );
+        } catch (e) {
+          // A throw part-way through the apply would leave circles marked while the
+          // findings that explain them are gone. Clearing the marking is the whole
+          // recovery: the red is derived from wrongStreet, so nothing else is left over.
+          features.forEach(f => { if (f) f.wrongStreet = null; });
+          console.warn('[SL-HN] audit failed:', e);
+          return [];
+        }
+      }
+
+      // Generation counter for recalculateFeatureStates, which writes shared state after
+      // an await and is reachable from nine unserialized subscriptions.
+      let recalcId = 0;
+
       async function recalculateFeatureStates() {
         if (!lastFeatures.length) return;
 
-        const selectionHNMap = await getVisibleHNsByStreet();
+        // Pin both the generation and the array. A single user action fires several of
+        // these events, and a Load can replace lastFeatures wholesale while one of them is
+        // still fetching — a late run would otherwise stamp states derived from the old
+        // viewport onto the new features and repaint over the fresh render. updateLayer's
+        // currentLoadId cannot help here, since this path never participates in it.
+        const myRecalcId = ++recalcId;
+        const features = lastFeatures;
 
-        lastFeatures.forEach(feat => {
+        const selectionHNMap = await getVisibleHNsByStreet();
+        if (myRecalcId !== recalcId || features !== lastFeatures) return;
+
+        features.forEach(feat => {
           const { number: hn, street: streetId, eX, eY } = feat;
           if (!hn || !streetId) return;
 
@@ -2397,20 +2534,7 @@
           feat.conflict = conflict;
         });
 
-        try {
-          lastAuditFindings = applyWrongStreetPairs(
-            lastFeatures,
-            computeAuditFindings(lastFeatures, selectionHNMap, lastLoadedBbox)
-          );
-        } catch (e) {
-          lastAuditFindings = [];
-          // A throw part-way through the apply would leave circles marked while the
-          // findings are gone. Not worth recomputing `conflict`: a leftover red without
-          // wrongStreet behaves as an ordinary conflict circle, which is how it behaved
-          // before this existed, and the next recompute corrects it.
-          lastFeatures.forEach(f => { if (f) f.wrongStreet = null; });
-          console.warn('[SL-HN] audit failed:', e);
-        }
+        lastAuditFindings = runAudit(features, selectionHNMap);
 
         applyFeatureFilter();
       }
@@ -2460,6 +2584,10 @@
               const key = hnIdToAddedKey.get(hnId);
               if (key != null) {
                 sessionAddedKeys.delete(key);
+                // Drop the "added anyway" record too, or the circle stays faded for a
+                // house number that no longer exists. Only reachable before a save,
+                // which is also the only point where this mapping still exists.
+                addedAnywayKeys.delete(key);
               }
             }
             refresh();
@@ -2487,6 +2615,7 @@
                 const key = hnIdToAddedKey.get(String(rawId));
                 if (key != null && sessionAddedKeys.has(key)) {
                   sessionAddedKeys.delete(key); // keep the mapping for a possible redo
+                  addedAnywayKeys.delete(key);
                   changed = true;
                 }
               });
@@ -2512,6 +2641,7 @@
                 const key = hnIdToAddedKey.get(id);
                 if (key != null && !sessionAddedKeys.has(key)) {
                   sessionAddedKeys.add(key);
+                  if (everAddedAnywayKeys.has(key)) addedAnywayKeys.add(key);
                   changed = true;
                 }
               });
@@ -2663,16 +2793,7 @@
               if (!fetchComplete) {
                 console.warn('[SL-HN] partial address data: reverse audit disabled for this load');
               }
-              try {
-                lastAuditFindings = applyWrongStreetPairs(
-                  lastFeatures,
-                  computeAuditFindings(lastFeatures, selectionHNMap, lastLoadedBbox)
-                );
-              } catch (e) {
-                lastAuditFindings = [];
-                lastFeatures.forEach(f => { if (f) f.wrongStreet = null; });
-                console.warn('[SL-HN] audit failed:', e);
-              }
+              lastAuditFindings = runAudit(lastFeatures, selectionHNMap);
 
               const allStreetIds = new Set();
               selectedSegments.forEach(seg => {
@@ -2703,7 +2824,7 @@
               analyzeStreetMatches();
 
               loading.style.display = 'none';
-              statusDiv.innerHTML = `Loaded ${lastFeatures.length} address points.<br/><b>Click numbers on map to add them!</b><br/>Green = selected • Orange = other • Red = possible wrong HN`;
+              statusDiv.innerHTML = `Loaded ${lastFeatures.length} address points.<br/><b>Click numbers on map to add them!</b><br/>Green = selected • Orange = other • Red = conflict or wrong street`;
               resolve();
             })
             .catch(err => {
