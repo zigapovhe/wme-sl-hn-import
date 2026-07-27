@@ -174,6 +174,13 @@ Click a house number whose official street name is missing from WME (or exists o
 - Map gestures no longer dismiss the fix-street dialog
 - First test suite — `node --test`, no dependencies and no build step
 
+### v2.4.1
+
+- Wrong-street detection: an address whose number already sits in WME under a different street name within 10 m is drawn as a red circle instead of a purple marker, and clicking it selects the segment to fix rather than adding a duplicate (see [🔴 Red conflicts](#-red-conflicts))
+- Red circles are drawn at the audit markers' size, so a circle you should not simply click reads as foreground
+- eProstor requests that time out, fail or return a server error are retried twice before the load settles for what it has, with a toast at every step (see [⏳ When eProstor is slow](#-when-eprostor-is-slow))
+- A request eProstor rejects now says so, instead of surfacing as `Unexpected token <`
+
 ---
 
 ## ⚠️ Notes & Gotchas
