@@ -184,7 +184,7 @@ If house numbers appear 🟠 orange instead of 🟢 green, the WME street name m
 **New in v2.1.0**: The script now warns you about mismatches and suggests corrections! Look for the yellow warning box and use the → button to fix street names with one click.
 
 ### 🔴 Red conflicts
-Red circles have two causes.
+Red circles are drawn larger than the rest, the same size as the audit markers, so a circle you should not simply click reads as foreground rather than as one more point in the field. They have two causes.
 
 **A different number is already there.** A *different* house number already exists within 10 m — typically a misplaced number sitting on the wrong segment.
 

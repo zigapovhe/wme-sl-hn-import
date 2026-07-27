@@ -74,6 +74,18 @@
   const FAR_STREET_MIN_DISTANCE = 50;
   const FAR_STREET_RATIO = 2;
 
+  // Radius in pixels for a map circle wide enough to hold its house-number label.
+  // Shared by every overlay that draws one, so a longer number cannot spill out of one
+  // of them: the sum used to be written out twice and the two copies had to be kept in
+  // step by hand.
+  function labelFitRadius(number) {
+    return number ? Math.max(String(number).length * 7, 12) : 12;
+  }
+  // Added on top for circles that must read as foreground rather than as one more point
+  // in the field: the audit markers, and the red circles a click will refuse. Without it
+  // they sat flush with their neighbours and read as background.
+  const MARKER_RADIUS_MARGIN = 6;
+
   // EProstor API configuration
   const EPROSTOR_API = 'https://ipi.eprostor.gov.si/wfs-si-gurs-rn/ogc/features/collections/SI.GURS.RN:REGISTER_NASLOVOV/items';
   const EPROSTOR_LIMIT = 1000;
@@ -999,8 +1011,12 @@
           return (p.isSelectedStreet && p.processed) ? 0.3 : 1;
         },
         getRadius: ({ feature }) => {
-          const num = feature.properties.number;
-          return num ? Math.max(String(num).length * 7, 12) : 12;
+          const p = feature.properties;
+          // Red means "do not just click this" — a different number is already within
+          // 10 m, or this one is in WME under another street. Sized like the audit
+          // markers so it reads as foreground; the wrong-street case in particular no
+          // longer has a purple marker to carry that weight for it.
+          return labelFitRadius(p.number) + (p.conflict ? MARKER_RADIUS_MARGIN : 0);
         },
         getLabel: ({ feature }) => String(feature.properties.number ?? '')
       },
@@ -1055,15 +1071,11 @@
         // The hollow variant used to sit at 0.15, which against WME's pale basemap left
         // only the ring showing and read as nothing at all.
         getAuditFillOpacity: ({ feature }) => feature.properties.type === 'missing' ? 1 : 0.6,
-        // Same label-fit sum as the house-number circles, plus a margin. Matching keeps
-        // longer numbers from spilling out of the marker; the margin keeps a marker
-        // bigger than the circle beside it, which is what was making these read as
+        // The same label fit as the house-number circles, plus the margin that lifts a
+        // marker above the circle beside it — which is what was making these read as
         // background and, since handleMapClick takes the nearest centre, made them
         // fiddly to hit.
-        getAuditRadius: ({ feature }) => {
-          const num = feature.properties.number;
-          return (num ? Math.max(String(num).length * 7, 12) : 12) + 6;
-        },
+        getAuditRadius: ({ feature }) => labelFitRadius(feature.properties.number) + MARKER_RADIUS_MARGIN,
         getAuditLabel: ({ feature }) => String(feature.properties.number ?? '')
       },
       styleRules: [{
