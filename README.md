@@ -23,11 +23,13 @@ After installing the script, you'll see a new **SL-HN** tab in the left sidebar 
 |-------|---------|
 | 🟢 Green | House numbers belonging to the **selected street** (primary or alternate) |
 | 🟠 Orange | House numbers belonging to **other streets** |
-| 🔴 Red | **Conflicts**, e.g. a different nearby existing house number |
+| 🔴 Red | **Conflicts** — a different nearby house number, or this number sitting on the wrong street |
 | ⚪ Faded green | Already present in WME |
 
 ### 👉 Adding house numbers
 **Click any circle to instantly add that house number to the nearest matching segment.**
+
+The one exception is a red wrong-street circle: clicking it explains the mismatch and selects the offending segment instead of adding, because adding would create a duplicate. See [🔴 Red conflicts](#-red-conflicts).
 
 No manual typing is needed — just click.
 
@@ -56,6 +58,8 @@ Purple markers, in two kinds:
 | ⚪ Hollow | The number **does exist**, but the WME pin sits more than 30 m from eProstor's point for it |
 
 Hollow markers are the weaker signal — a house number can legitimately sit a building's width from the official point, so treat them as "worth a look", not as proof of an error.
+
+One case is drawn as a red circle instead of a marker: when the same number exists in eProstor within 10 m under a different street name — see [🔴 Red conflicts](#-red-conflicts). The sidebar still counts those cases alongside the marker counts, so an area whose problems are all of this kind does not read as a clean audit.
 
 **Clicking a marker centers the map and selects the owning segment** (changing your current selection), then tells you why it was flagged. It never edits or deletes anything — fix it yourself with WME's house-number editor.
 
@@ -170,6 +174,13 @@ Click a house number whose official street name is missing from WME (or exists o
 - Map gestures no longer dismiss the fix-street dialog
 - First test suite — `node --test`, no dependencies and no build step
 
+### v2.4.1
+
+- Wrong-street detection: an address whose number already sits in WME under a different street name within 10 m is drawn as a red circle instead of a purple marker, and clicking it selects the segment to fix rather than adding a duplicate (see [🔴 Red conflicts](#-red-conflicts))
+- Red circles are drawn at the audit markers' size, so a circle you should not simply click reads as foreground
+- eProstor requests that time out, fail or return a server error are retried twice before the load settles for what it has, with a toast at every step (see [⏳ When eProstor is slow](#-when-eprostor-is-slow))
+- A request eProstor rejects now says so, instead of surfacing as `Unexpected token <`
+
 ---
 
 ## ⚠️ Notes & Gotchas
@@ -180,7 +191,15 @@ If house numbers appear 🟠 orange instead of 🟢 green, the WME street name m
 **New in v2.1.0**: The script now warns you about mismatches and suggests corrections! Look for the yellow warning box and use the → button to fix street names with one click.
 
 ### 🔴 Red conflicts
-Red numbers appear when a **different** house number already exists within 10 m — typically a misplaced number sitting on the wrong segment.
+Red circles are drawn larger than the rest, the same size as the audit markers, so a circle you should not simply click reads as foreground rather than as one more point in the field. They have two causes.
+
+**A different number is already there.** A *different* house number already exists within 10 m — typically a misplaced number sitting on the wrong segment.
+
+**This number is on the wrong street.** The number exists in eProstor, but the WME house number carrying it is attached to a different street, within 10 m. Clicking the circle does **not** add it — that would leave you with two copies of the number. Instead it names the street WME has it under (including an alternate name, if that is the one carrying it) and selects that segment so you can fix or delete the house number with WME's own editor. If that segment is no longer loaded, the message says so rather than leaving you to act on a selection that never changed. There is no "add anyway": if you believe eProstor is the one that is wrong, add the number with WME's house-number editor directly.
+
+These circles stay visible under **Show only the selected street** whichever of the two streets is selected — otherwise the one warning left for the case would vanish exactly when you select the segment that needs fixing. A house number you attached yourself with **Add anyway** is not treated as a wrong-street case, so the script does not turn around and flag the edit it made on your instruction.
+
+Detecting this needs the *other* street to be present in the loaded eProstor data too, and it inherits the audit's silences — it goes quiet after a partial fetch, near the edge of the fetched area, and for house numbers outside the current viewport.
 
 Casing and spacing are not conflicts: `4A`, `4a` and `4 a` are all treated as the same number, on both the eProstor and the WME side.
 
@@ -193,6 +212,11 @@ If you select a segment **without** a street name:
 
 ### 📡 Accuracy
 EProstor coordinates are normally precise, but always visually verify before adding.
+
+### ⏳ When eProstor is slow
+Requests time out after 30 seconds, sometimes at random and on areas of any size. A page that times out, fails at the network level or comes back with a server error is re-issued up to twice, one second and then three seconds later, and a toast tells you each time so a long wait is never unexplained. A load spends at most four retries in total, so a service having a bad day cannot turn one click into a very long spinner.
+
+If the retries run out, the addresses that did arrive are still drawn — but the reverse audit switches off for that area, because it must never call an address missing when the truth is that it was never fetched. A request eProstor *rejects* (a bad query rather than a bad moment) is not retried; the message says so instead.
 
 ---
 

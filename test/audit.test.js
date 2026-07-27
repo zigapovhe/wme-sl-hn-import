@@ -5,7 +5,10 @@ const assert = require('node:assert');
 
 const {
   computeAuditFindings,
-  AUDIT_MAX_DISTANCE
+  findWrongStreetPairs,
+  applyWrongStreetPairs,
+  AUDIT_MAX_DISTANCE,
+  MAX_HN_CONFLICT_DISTANCE
 } = require('../wme-sl-hn-import.user.js');
 
 // Coordinates are EPSG:3794 metres, so distances in these fixtures are literal.
@@ -28,6 +31,15 @@ function wmeIndex(streets) {
 
 function wmeHn({ hnId, num, x, y, segmentId = 500 }) {
   return { hnId, num, x, y, segmentId, lon: 14 + x / 100000, lat: 46 + y / 100000 };
+}
+
+// One audit finding as computeAuditFindings emits it.
+function auditFinding({ number, streetKeys, eX, eY, type = 'missing', hnId = '1', segmentId = 500 }) {
+  return {
+    hnId, number, segmentId, streetKeys, type,
+    lon: 14 + eX / 100000, lat: 46 + eY / 100000,
+    eX, eY
+  };
 }
 
 test('a house number matching eProstor in number and position is not flagged', () => {
@@ -227,4 +239,250 @@ test('several unmatched house numbers each produce their own finding', () => {
   );
   assert.strictEqual(findings.length, 2);
   assert.deepStrictEqual(findings.map(f => f.number).sort(), ['97', '98']);
+});
+
+test('a finding carries the projected coordinates the wrong-street pairing needs', () => {
+  // Without these the pairing silently matches nothing, and every other test still passes.
+  const findings = computeAuditFindings(
+    [official('main_st', '12', 100, 100)],
+    wmeIndex({ main_st: [wmeHn({ hnId: '1', num: '99', x: 250, y: 400 })] }),
+    BBOX
+  );
+  assert.strictEqual(findings.length, 1);
+  assert.strictEqual(findings[0].eX, 250);
+  assert.strictEqual(findings[0].eY, 400);
+});
+
+test('an unmatched address pairs with a same-numbered house number on another street', () => {
+  const feature = official('ulica_a', '5', 100, 100);
+  const finding = auditFinding({ number: '5', streetKeys: ['ulica_b'], eX: 104, eY: 100 });
+  const pairs = findWrongStreetPairs([feature], [finding]);
+  assert.strictEqual(pairs.length, 1);
+  assert.strictEqual(pairs[0].feature, feature, 'pairs reference the inputs, not copies');
+  assert.strictEqual(pairs[0].finding, finding);
+  assert.strictEqual(pairs[0].distance, 4);
+});
+
+test('a house number beyond the conflict radius is not the same address', () => {
+  const pairs = findWrongStreetPairs(
+    [official('ulica_a', '5', 100, 100)],
+    [auditFinding({
+      number: '5', streetKeys: ['ulica_b'],
+      eX: 100, eY: 100 + MAX_HN_CONFLICT_DISTANCE + 0.5
+    })]
+  );
+  assert.deepStrictEqual(pairs, []);
+});
+
+test('exactly at the conflict radius still pairs', () => {
+  const pairs = findWrongStreetPairs(
+    [official('ulica_a', '5', 100, 100)],
+    [auditFinding({
+      number: '5', streetKeys: ['ulica_b'],
+      eX: 100, eY: 100 + MAX_HN_CONFLICT_DISTANCE
+    })]
+  );
+  assert.strictEqual(pairs.length, 1, 'inclusive, like the audit threshold');
+});
+
+test('an address already in WME is not waiting for anything', () => {
+  const pairs = findWrongStreetPairs(
+    [{ ...official('ulica_a', '5', 100, 100), processed: true }],
+    [auditFinding({ number: '5', streetKeys: ['ulica_b'], eX: 104, eY: 100 })]
+  );
+  assert.deepStrictEqual(pairs, []);
+});
+
+test('a misplaced finding is a different diagnosis and does not pair', () => {
+  const pairs = findWrongStreetPairs(
+    [official('ulica_a', '5', 100, 100)],
+    [auditFinding({ number: '5', streetKeys: ['ulica_b'], eX: 104, eY: 100, type: 'misplaced' })]
+  );
+  assert.deepStrictEqual(pairs, []);
+});
+
+test('a shared street name means the audit already judged it', () => {
+  const pairs = findWrongStreetPairs(
+    [official('ulica_a', '5', 100, 100)],
+    [auditFinding({ number: '5', streetKeys: ['ulica_a', 'ulica_b'], eX: 104, eY: 100 })]
+  );
+  assert.deepStrictEqual(pairs, []);
+});
+
+test('a different number nearby is somebody else problem', () => {
+  const pairs = findWrongStreetPairs(
+    [official('ulica_a', '5', 100, 100)],
+    [auditFinding({ number: '6', streetKeys: ['ulica_b'], eX: 104, eY: 100 })]
+  );
+  assert.deepStrictEqual(pairs, []);
+});
+
+test('one house number reddens only the nearest of two candidate addresses', () => {
+  // Input order deliberately puts the farther one first, so passing proves the sort ran.
+  const near = official('ulica_a', '5', 100, 100);
+  const far = official('ulica_c', '5', 106, 100);
+  const finding = auditFinding({ number: '5', streetKeys: ['ulica_b'], eX: 102, eY: 100 });
+  const pairs = findWrongStreetPairs([far, near], [finding]);
+  assert.strictEqual(pairs.length, 1);
+  assert.strictEqual(pairs[0].feature, near);
+});
+
+test('one address pairs with only one house number', () => {
+  const feature = official('ulica_a', '5', 100, 100);
+  const closer = auditFinding({ number: '5', streetKeys: ['ulica_b'], eX: 102, eY: 100, hnId: 'A' });
+  const farther = auditFinding({ number: '5', streetKeys: ['ulica_c'], eX: 104, eY: 100, hnId: 'B' });
+  const pairs = findWrongStreetPairs([feature], [farther, closer]);
+  assert.strictEqual(pairs.length, 1);
+  assert.strictEqual(pairs[0].finding, closer);
+});
+
+test('empty and missing inputs pair nothing', () => {
+  const feature = official('ulica_a', '5', 100, 100);
+  const finding = auditFinding({ number: '5', streetKeys: ['ulica_b'], eX: 104, eY: 100 });
+  assert.deepStrictEqual(findWrongStreetPairs([], []), []);
+  assert.deepStrictEqual(findWrongStreetPairs(null, [finding]), []);
+  assert.deepStrictEqual(findWrongStreetPairs([feature], null), []);
+  assert.deepStrictEqual(findWrongStreetPairs([feature], []), []);
+});
+
+test('a legitimate same-numbered address on the next street does not redden anything', () => {
+  // eProstor has both A 5 and B 5, 15 m apart at a corner. WME has one house number: 5,
+  // correctly on B. A 5 is genuinely missing and must stay addable. No false red here
+  // because the audit matches the house number to its own street, so it never emits a
+  // finding for findWrongStreetPairs to pair with — the corner case resolves before the
+  // pairing rule even runs, not because of anything in the pairing rule itself.
+  const features = [official('ulica_a', '5', 100, 100), official('ulica_b', '5', 100, 115)];
+  const findings = computeAuditFindings(
+    features,
+    wmeIndex({ ulica_b: [wmeHn({ hnId: '1', num: '5', x: 100, y: 115 })] }),
+    BBOX
+  );
+  assert.deepStrictEqual(findings, [], 'the house number matches its own street');
+  assert.deepStrictEqual(findWrongStreetPairs(features, findings), []);
+});
+
+test('end to end: a house number on the wrong street becomes a pair', () => {
+  // eProstor must carry *something* on the wrong street, or the audit never judges it.
+  const features = [official('ulica_a', '5', 100, 100), official('ulica_b', '7', 100, 200)];
+  const findings = computeAuditFindings(
+    features,
+    wmeIndex({ ulica_b: [wmeHn({ hnId: '9', num: '5', x: 100, y: 104, segmentId: 777 })] }),
+    BBOX
+  );
+  assert.strictEqual(findings.length, 1);
+  assert.strictEqual(findings[0].type, 'missing');
+
+  const pairs = findWrongStreetPairs(features, findings);
+  assert.strictEqual(pairs.length, 1);
+  assert.strictEqual(pairs[0].feature, features[0]);
+  assert.strictEqual(pairs[0].finding.segmentId, 777);
+});
+
+test('a wrong street absent from the loaded data cannot be detected', () => {
+  // A stated limitation, kept honest: the audit only judges streets eProstor answered
+  // for, so there is no finding to pair and the circle stays plainly addable.
+  const features = [official('ulica_a', '5', 100, 100)];
+  const findings = computeAuditFindings(
+    features,
+    wmeIndex({ ulica_b: [wmeHn({ hnId: '1', num: '5', x: 100, y: 104 })] }),
+    BBOX
+  );
+  assert.deepStrictEqual(findings, []);
+  assert.deepStrictEqual(findWrongStreetPairs(features, findings), []);
+});
+
+test('applying a pair marks the circle and drops the purple marker', () => {
+  const feature = official('ulica_a', '5', 100, 100);
+  const finding = auditFinding({
+    number: '5', streetKeys: ['ulica_b'], eX: 104, eY: 100, segmentId: 777
+  });
+  const remaining = applyWrongStreetPairs([feature], [finding]);
+  assert.deepStrictEqual(feature.wrongStreet, { segmentId: 777, streetKeys: ['ulica_b'] });
+  assert.deepStrictEqual(remaining, [], 'a wrong-street number is not missing from eProstor');
+});
+
+test('the marking carries the street keys the house number is indexed under', () => {
+  // Both, not just the primary: the renderer needs them to keep this circle visible while
+  // "selected street only" is showing the WME street, and the click needs them to name the
+  // street that actually carries the number when an alternate name produced the match.
+  const feature = official('ulica_a', '5', 100, 100);
+  const finding = auditFinding({
+    number: '5', streetKeys: ['ulica_b', 'ulica_c'], eX: 104, eY: 100, segmentId: 777
+  });
+  applyWrongStreetPairs([feature], [finding]);
+  assert.deepStrictEqual(feature.wrongStreet.streetKeys, ['ulica_b', 'ulica_c']);
+});
+
+test('applying a pair does not touch conflict', () => {
+  // The red is derived from wrongStreet at render time. Writing a second field here would
+  // mean two owners for one fact, and this function resets only one of them.
+  const feature = official('ulica_a', '5', 100, 100);
+  const finding = auditFinding({
+    number: '5', streetKeys: ['ulica_b'], eX: 104, eY: 100, segmentId: 777
+  });
+  applyWrongStreetPairs([feature], [finding]);
+  assert.strictEqual('conflict' in feature, false);
+});
+
+test('a marking is cleared even when nothing else about the feature changes', () => {
+  // The trap: applyWrongStreetPairs resets wrongStreet on every feature, so the reset has
+  // to be the whole story. Anything it wrote and did not reset would survive the user
+  // fixing the street.
+  const feature = { ...official('ulica_a', '5', 100, 100), wrongStreet: { segmentId: 1 } };
+  const other = official('ulica_a', '9', 500, 500);
+  applyWrongStreetPairs([feature, other], [
+    auditFinding({ number: '9', streetKeys: ['ulica_b'], eX: 504, eY: 500, segmentId: 42 })
+  ]);
+  assert.strictEqual(feature.wrongStreet, null, 'the stale marking is gone');
+  assert.strictEqual('conflict' in feature, false, 'and left no red behind to explain');
+});
+
+test('only the paired finding is dropped', () => {
+  const feature = official('ulica_a', '5', 100, 100);
+  const paired = auditFinding({ number: '5', streetKeys: ['ulica_b'], eX: 104, eY: 100 });
+  const other  = auditFinding({ number: '9', streetKeys: ['ulica_b'], eX: 500, eY: 500, hnId: '2' });
+  assert.deepStrictEqual(applyWrongStreetPairs([feature], [paired, other]), [other]);
+});
+
+test('an unpaired finding keeps its marker and leaves the circle alone', () => {
+  const feature = official('ulica_a', '5', 100, 100);
+  const far = auditFinding({ number: '9', streetKeys: ['ulica_b'], eX: 500, eY: 500 });
+  const remaining = applyWrongStreetPairs([feature], [far]);
+  assert.deepStrictEqual(remaining, [far]);
+  assert.strictEqual(feature.wrongStreet, null);
+  assert.notStrictEqual(feature.conflict, true);
+});
+
+test('a marking from a previous run is cleared before re-applying', () => {
+  // The trap this guards: the user fixes the street, the pair disappears, and a stale
+  // marking would leave the circle refusing the add forever.
+  const feature = {
+    ...official('ulica_a', '5', 100, 100),
+    wrongStreet: { segmentId: 777, streetKeys: ['ulica_b'] }
+  };
+  const remaining = applyWrongStreetPairs([feature], []);
+  assert.strictEqual(feature.wrongStreet, null);
+  assert.deepStrictEqual(remaining, []);
+});
+
+test('a non-finite coordinate pairs with nothing', () => {
+  // NaN passes every comparison in the distance test (NaN > maxSq is false), so an
+  // unguarded NaN would pair with everything in range and then scramble the sort that
+  // makes the pairing one-to-one. proj4 rejects non-finite input today; this keeps the
+  // invariant local rather than borrowed.
+  const finding = auditFinding({ number: '5', streetKeys: ['ulica_b'], eX: 104, eY: 100 });
+  assert.deepStrictEqual(findWrongStreetPairs([official('ulica_a', '5', NaN, 100)], [finding]), []);
+  assert.deepStrictEqual(findWrongStreetPairs([official('ulica_a', '5', 100, NaN)], [finding]), []);
+  assert.deepStrictEqual(
+    findWrongStreetPairs(
+      [official('ulica_a', '5', 100, 100)],
+      [auditFinding({ number: '5', streetKeys: ['ulica_b'], eX: NaN, eY: 100 })]
+    ),
+    []
+  );
+});
+
+test('applying nothing returns the findings untouched', () => {
+  assert.deepStrictEqual(applyWrongStreetPairs(null, null), []);
+  assert.deepStrictEqual(applyWrongStreetPairs([], []), []);
 });

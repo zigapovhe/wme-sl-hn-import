@@ -130,9 +130,27 @@ async function bootScript(storage = {}, whileStubbed = null, options = {}) {
     requestAnimationFrame: (fn) => setTimeout(fn, 0),
     // Fails every request, on purpose: the interesting question for auto-load is what
     // it does *after* a fetch it could not use.
+    //
+    // The failure is non-retryable by default — a rejected query, which is what a real
+    // non-2xx looks like: an HTML error page where JSON was expected. A retryable failure
+    // here would arm the retry backoff in every test that fetches, and those timers fire
+    // seconds later, long after the drain below has put the stubs back.
+    // options.fetchFailure = 'timeout-then-ok' opts into the retry path instead: the first
+    // attempt times out, the next succeeds.
     GM_xmlhttpRequest(req) {
       requests.push(req);
-      setTimeout(() => req.onerror && req.onerror(new Error('stubbed network failure')), 0);
+      const attempt = requests.length;
+      setTimeout(() => {
+        if (options.fetchFailure === 'timeout-then-ok') {
+          if (attempt === 1) { req.ontimeout && req.ontimeout(); return; }
+          req.onload && req.onload({
+            status: 200,
+            responseText: JSON.stringify({ features: [], numberReturned: 0, numberMatched: 0 })
+          });
+          return;
+        }
+        req.onload && req.onload({ status: 400, responseText: '<html>Bad Request</html>' });
+      }, 0);
     },
     GM_setClipboard() {},
     localStorage: {
@@ -306,6 +324,42 @@ test('a failed auto-load is not retried on the next selection change', () => {
         'the same area must not be re-fetched after its fetch failed');
     },
     { selection: { objectType: 'segment', ids: ['s1'] }, segments: { s1: segment } }
+  );
+});
+
+test('a timed-out page is re-issued rather than losing the load', () => {
+  // decideFetchRetry decides the policy and is unit-tested; what this covers is the
+  // wiring the pure test cannot see — that a timeout actually re-issues the request, at
+  // the SAME startIndex, and that the load then completes instead of rejecting.
+  const segment = {
+    id: 's1',
+    geometry: { coordinates: [[14.5, 46.05], [14.501, 46.051]] },
+    primaryStreetId: null,
+    alternateStreetIds: []
+  };
+  return bootScript(
+    { 'qhnsl-layer-visible': '1', 'qhnsl-autoload': '1' },
+    async ({ handlers, requests }) => {
+      for (const h of handlers.get('wme-selection-changed') || []) h({});
+      await new Promise(r => setTimeout(r, 600)); // past the 400 ms auto-load debounce
+      assert.strictEqual(requests.length, 1, 'the first attempt goes out');
+
+      // Polled rather than slept: the retry lands one backoff after the failure, which is
+      // itself one debounce after this handler fired, and a fixed sleep that has to cover
+      // both is either flaky or needlessly slow.
+      const deadline = Date.now() + 2000;
+      while (requests.length < 2 && Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 50));
+      }
+      assert.strictEqual(requests.length, 2, 'the timed-out page is re-issued');
+      assert.strictEqual(requests[1].url, requests[0].url,
+        'at the same startIndex — a retry that moved on would skip a page');
+    },
+    {
+      selection: { objectType: 'segment', ids: ['s1'] },
+      segments: { s1: segment },
+      fetchFailure: 'timeout-then-ok'
+    }
   );
 });
 
